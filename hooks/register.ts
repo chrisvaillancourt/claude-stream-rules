@@ -1,46 +1,38 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, TurnStepChunk } from 'claude-code'
 
+import { isCurrent, transition } from './lifecycle'
+import type { Action, Event } from './lifecycle'
 import {
   DRAFT_USAGE,
   INITIAL,
   USAGE,
-  canCorrect,
   configFrom,
-  firedAt,
-  stepsOf,
-  contextText,
-  correctionText,
-  denyText,
   draftCheck,
   draftPrompt,
   extractDraft,
+  firedAt,
   isActive,
   isEligible,
   judgePrompt,
-  judgedText,
   listText,
-  loopKey,
-  markFired,
-  bumpStep,
   parseArgs,
   parseDraftArgs,
   parseVerdict,
   recentContext,
-  reminderText,
+  stepsOf,
   statusText,
   testText,
 } from './policy'
 import { compile, matchText, matchTool, mergeRules, parseRule } from './rules'
 import type { Rule } from './rules'
-import type { Config, LoadError, RuleSource, RuleSpec } from '../types'
+import type { Claim, Config, LoadError, RuleSource, RuleSpec, Session } from '../types'
 
 const NAME = 'stream-rules'
 
 // Change a shape tag when its stored type changes: a value an older version
 // stored (it outlives a hot reload) then reads as the initial value.
-const sessionAtom = atom({ plugin: 'stream-rules', key: 'session' } as const, INITIAL, { shape: 'session-3' })
-const pendingAtom = atom({ plugin: 'stream-rules', key: 'pending' } as const, null, { shape: 'pending-2' })
+const sessionAtom = atom({ plugin: 'stream-rules', key: 'session' } as const, INITIAL, { shape: 'session-4' })
 const draftAtom = atom({ plugin: 'stream-rules', key: 'draft' } as const, null, { shape: 'draft-1' })
 
 // Module variables reset on a hot reload; register and session.start run again then.
@@ -108,100 +100,108 @@ async function loadRules($: EngineInterface) {
   if (errors.length > 0) log($, `${errors.length} rule file(s) failed to load; /stream-rules list shows why`)
 }
 
-async function appendReminder($: EngineInterface, text: string, agentId: string | undefined) {
-  try {
-    const r = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] }, ...(agentId !== undefined ? { agentId } : {}) })
-    if (r.deny !== undefined) await recordError($, `a reminder was refused: ${r.deny}`)
-  } catch (err) {
-    await recordError($, `a reminder could not be added${agentId ? ` to agent ${agentId}` : ''}: ${errText(err)}`)
-  }
-}
 
-type ProseDecision = { kind: 'none' } | { kind: 'remind'; rules: Rule[] } | { kind: 'stop'; rules: Rule[]; pendingId: string }
+// --- Ownership: every change goes through lifecycle.transition in one update;
+// every externally visible action re-reads the state first (stillCurrent).
 
-/** Claims the eligible rules among `hits` and decides: stop the turn, remind, or nothing. */
-async function decideProse($: EngineInterface, turnId: string, agentId: string | undefined, hits: Rule[]): Promise<ProseDecision> {
-  const loop = loopKey(agentId)
-  let decision: ProseDecision = { kind: 'none' }
-  let epoch = 0
-  const pendingId = `p${++counter}`
+/** Runs one lifecycle event atomically and returns the actions it asks for. */
+async function dispatch($: EngineInterface, ev: Event): Promise<Action[]> {
+  let actions: Action[] = []
   await update($, sessionAtom, s => {
-    epoch = s.epoch
-    const steps = stepsOf(s, loop)
-    const eligible = hits.filter(r => isEligible(r, 'prose', firedAt(s, loop, r.name), steps))
-    if (eligible.length === 0) {
-      decision = { kind: 'none' }
-      return s
-    }
-    const fired = markFired(s, loop, eligible.map(r => r.name))
-    // Stop only a turn that belongs to the current epoch: one started before a
-    // newer prompt (typed mid-turn) or an on/off gets a reminder at most.
-    const owned = s.turn !== null && s.turn.id === turnId && s.turn.epoch === s.epoch
-    const wantsStop = agentId === undefined && owned && eligible.some(r => r.interrupt)
-    if (wantsStop && canCorrect(config, s)) {
-      decision = { kind: 'stop', rules: eligible, pendingId }
-      return { ...fired, corrections: s.corrections + 1 }
-    }
-    decision = { kind: 'remind', rules: eligible }
-    return fired
+    const r = transition(s, ev, config)
+    actions = r.actions
+    return r.state
   })
-  const d = decision as ProseDecision
-  if (d.kind === 'stop') {
-    await update($, pendingAtom, () => ({ id: pendingId, turnId, rules: d.rules.map(r => r.name), text: correctionText(d.rules), epoch }))
-  }
-  return d
+  return actions
 }
 
-/** Whether work owned by `epoch` may still be delivered: nothing superseded it and the mod is on. */
-async function isCurrent($: EngineInterface, epoch: number): Promise<boolean> {
-  const s = await read($, sessionAtom)
-  return s.epoch === epoch && isActive(config, s)
+/**
+ * Asks the session, right before an action, whether `test` still holds. It
+ * goes through `update` (a versioned write of the same value), not a plain
+ * read: a read can still hold this module's own earlier write when another
+ * hook's later write has landed, and a versioned write retries on that miss.
+ */
+async function confirm($: EngineInterface, test: (s: Session) => boolean): Promise<boolean> {
+  let ok = false
+  await update($, sessionAtom, s => {
+    ok = test(s)
+    return s
+  })
+  return ok
 }
 
-/** A newer prompt, an on/off or a /clear: start a new epoch and drop the pending correction. */
-async function supersede($: EngineInterface, why: string, resetCorrections: boolean) {
-  await update($, sessionAtom, s => ({ ...s, epoch: s.epoch + 1, ...(resetCorrections ? { corrections: 0 } : {}) }))
-  const p = await read($, pendingAtom)
-  if (p !== null) {
-    await update($, pendingAtom, cur => (cur?.id === p.id ? null : cur))
-    log($, `dropped the correction for ${p.rules.join(', ')} (${why})`)
-  }
+/** May work owned by `epoch` still act? Checked after every await, before each action. */
+async function stillCurrent($: EngineInterface, epoch: number): Promise<boolean> {
+  return confirm($, s => isCurrent(config, s, epoch))
 }
 
-/** After a stopped turn ends: send the corrective prompt, unless its epoch was superseded or the mod is off. */
-async function sendCorrection($: EngineInterface, id: string) {
-  const p = await read($, pendingAtom)
-  if (p === null || p.id !== id) return
-  await update($, pendingAtom, cur => (cur?.id === id ? null : cur))
-  // Checked last, with no await between it and the submit.
-  if (!(await isCurrent($, p.epoch))) {
-    log($, `dropped the correction for ${p.rules.join(', ')} (superseded, or the mod is off)`)
-    return
-  }
+/** An undelivered claim is released, so the rule isn't spent unseen. */
+async function releaseClaim($: EngineInterface, claim: Claim, why: string) {
+  await dispatch($, { kind: 'release', claim })
+  log($, `${why}; nothing delivered`)
+}
+
+async function deliverReminder($: EngineInterface, a: Extract<Action, { kind: 'remind' }>) {
+  if (!(await stillCurrent($, a.epoch))) return releaseClaim($, a.claim, 'a reminder lost its owner (newer prompt, off or /clear)')
   try {
-    const r = await $.prompt.submit({ text: p.text })
-    if (r.drop !== undefined) await recordError($, `the corrective prompt for ${p.rules.join(', ')} was dropped: ${r.drop}`)
-    else log($, `sent a correction for ${p.rules.join(', ')}`)
+    const r = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: a.text }] }, ...(a.agentId !== undefined ? { agentId: a.agentId } : {}) })
+    if (r.deny === undefined) return
+    await recordError($, `a reminder was refused: ${r.deny}`)
   } catch (err) {
-    await recordError($, `the corrective prompt for ${p.rules.join(', ')} failed: ${errText(err)}`)
+    await recordError($, `a reminder could not be added${a.agentId ? ` to agent ${a.agentId}` : ''}: ${errText(err)}`)
+  }
+  await dispatch($, { kind: 'release', claim: a.claim })
+}
+
+async function deliverSubmit($: EngineInterface, a: Extract<Action, { kind: 'submit' }>) {
+  if (!(await stillCurrent($, a.epoch))) return releaseClaim($, a.claim, `${a.label} lost its owner (newer prompt, off or /clear)`)
+  try {
+    const r = await $.prompt.submit({ text: a.text })
+    if (r.drop === undefined) return log($, `sent ${a.label}`)
+    await recordError($, `${a.label} was dropped: ${r.drop}`)
+  } catch (err) {
+    await recordError($, `${a.label} failed: ${errText(err)}`)
+  }
+  await dispatch($, { kind: 'release', claim: a.claim })
+}
+
+/** Performs the actions that need no stream or tool call of their own; `abort`, `deny` and `note` are the caller's. */
+async function perform($: EngineInterface, actions: readonly Action[]) {
+  for (const a of actions) {
+    if (a.kind === 'log') log($, a.text)
+    else if (a.kind === 'error') await recordError($, a.text)
+    else if (a.kind === 'remind') await deliverReminder($, a)
+    else if (a.kind === 'submit') await deliverSubmit($, a)
+    else if (a.kind === 'schedule-correction') {
+      const id = a.pendingId
+      $.clock.after(0, () => correctionDue($, id))
+    } else if (a.kind === 'schedule-judge') {
+      const { answer, epoch } = a
+      $.clock.after(0, () => judge($, answer, epoch).catch(err => log($, `judging failed: ${errText(err)}`)))
+    }
   }
 }
 
-/** Judged rules, after a main-loop answer: ask each question, then remind (or correct) on a yes. */
+async function correctionDue($: EngineInterface, pendingId: string) {
+  await perform($, await dispatch($, { kind: 'deliver-correction', pendingId }))
+}
+
+/** Judged rules, after a main-loop answer: ask each question, then hand the yeses to the lifecycle. */
 async function judge($: EngineInterface, answer: string, epoch: number) {
   const s0 = await read($, sessionAtom)
+  if (!isCurrent(config, s0, epoch)) return
   const steps = stepsOf(s0, 'main')
   const candidates = rules
     .filter(r => r.enabled && r.question !== undefined)
     .filter(r => isEligible(r, 'prose', firedAt(s0, 'main', r.name), steps))
     .filter(r => r.regexes.length === 0 || r.regexes.some(re => re.test(answer)))
     .slice(0, config.judgeMaxPerTurn)
-  const broken: Rule[] = []
+  const broken: RuleSpec[] = []
   for (const r of candidates) {
     const { system, prompt } = judgePrompt(r, answer)
     try {
       const res = await $.model.complete({ model: config.judgeModel, system, prompt, maxTokens: 64, effort: 'low', timeoutMs: 30_000 })
-      if (!(await isCurrent($, epoch))) return
+      if (!(await stillCurrent($, epoch))) return log($, 'dropped a judgment (newer prompt, off or /clear)')
       if (!res.isAnswered) {
         log($, `judging ${r.name} failed (${res.reason}); nothing delivered`)
         continue
@@ -214,28 +214,7 @@ async function judge($: EngineInterface, answer: string, epoch: number) {
     }
   }
   if (broken.length === 0) return
-  let claimed: Rule[] = []
-  let correct = false
-  // The claim rechecks ownership atomically; delivery follows it directly.
-  await update($, sessionAtom, s => {
-    claimed = []
-    if (s.epoch !== epoch || !isActive(config, s)) return s
-    const now = stepsOf(s, 'main')
-    claimed = broken.filter(r => isEligible(r, 'prose', firedAt(s, 'main', r.name), now))
-    if (claimed.length === 0) return s
-    correct = config.judgeAction === 'correct' && canCorrect(config, s)
-    const fired = markFired(s, 'main', claimed.map(r => r.name))
-    return correct ? { ...fired, corrections: s.corrections + 1 } : fired
-  })
-  if (claimed.length === 0) return
-  if (correct) {
-    try {
-      const r = await $.prompt.submit({ text: judgedText(claimed, 'correct') })
-      if (r.drop !== undefined) await recordError($, `a judged correction was dropped: ${r.drop}`)
-    } catch (err) {
-      await recordError($, `a judged correction failed: ${errText(err)}`)
-    }
-  } else await appendReminder($, judgedText(claimed, 'remind'), undefined)
+  await perform($, await dispatch($, { kind: 'judge-result', epoch, broken }))
 }
 
 async function runDraft($: EngineInterface, complaint: string): Promise<string> {
@@ -274,11 +253,8 @@ async function saveDraft($: EngineInterface, dest: 'project' | 'user', overwrite
 async function startSession($: EngineInterface, sessionCwd: string) {
   cwd = sessionCwd.replace(/\/+$/, '')
   home = ((await $.env.get('HOME')) ?? '').replace(/\/+$/, '')
-  const stale = await read($, pendingAtom)
-  if (stale !== null) {
-    await update($, pendingAtom, () => null)
-    log($, `dropped a pending correction for ${stale.rules.join(', ')} (the mod reloaded before it was sent)`)
-  }
+  // Timers died with the old module: a pending correction can't be sent now.
+  await perform($, await dispatch($, { kind: 'reload' }))
   await loadRules($)
 }
 
@@ -300,26 +276,22 @@ export const register: Register = (on, options) => {
 
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear') {
-      await update($, sessionAtom, s => ({ ...INITIAL, mode: s.mode, epoch: s.epoch + 1 }))
-      await update($, pendingAtom, () => null)
+      await dispatch($, { kind: 'clear' })
       await update($, draftAtom, () => null)
     }
     return next(e)
   })
 
   on('prompt.submit', async ($, e, next) => {
-    const isOurs = e.origin.kind === 'plugin' && e.origin.name === NAME
-    if (!isOurs && e.command === undefined) await supersede($, 'a newer prompt arrived', true)
+    const origin = e.origin.kind === 'plugin' ? { kind: 'plugin', name: e.origin.name } : { kind: e.origin.kind }
+    await perform($, await dispatch($, { kind: 'ingress', ingress: { origin, ...(e.command ? { command: { name: e.command.name } } : {}), ...(e.isMeta ? { isMeta: true } : {}) } }))
     return next(e)
-  }).catch(($, e, next) => next(e)) // never hold up a prompt over the counter
+  }).catch(($, e, next) => next(e)) // never hold up a prompt over bookkeeping
 
   on('command.run', { command: 'stream-rules' }, async ($, e) => {
     const cmd = parseArgs(e.args)
     if (cmd.kind === 'help') return { text: cmd.error ? `${cmd.error}\n${USAGE}` : USAGE }
-    if (cmd.kind === 'set') {
-      await update($, sessionAtom, s => ({ ...s, mode: cmd.mode }))
-      await supersede($, `/stream-rules ${cmd.mode}`, false)
-    }
+    if (cmd.kind === 'set') await perform($, await dispatch($, { kind: 'set-mode', mode: cmd.mode }))
     if (cmd.kind === 'reload') await loadRules($)
     if (cmd.kind === 'reset') await update($, sessionAtom, s => ({ ...s, fired: {}, lastError: null }))
     if (cmd.kind === 'list') return { text: listText(rules, loadErrors) }
@@ -345,25 +317,22 @@ export const register: Register = (on, options) => {
     if (rules.length === 0) return next(e)
     const hits = matchTool(rules, String(e.tool), e)
     if (hits.length === 0) return next(e)
-    if (!isActive(config, await read($, sessionAtom))) return next(e)
-    const loop = loopKey(e.agentId)
-    let eligible: Rule[] = []
-    await update($, sessionAtom, s => {
-      const steps = stepsOf(s, loop)
-      eligible = hits.filter(r => isEligible(r, 'tool', firedAt(s, loop, r.name), steps))
-      return eligible.length === 0 ? s : markFired(s, loop, eligible.map(r => r.name))
-    })
-    if (eligible.length === 0) return next(e)
-    const stop = eligible.filter(r => r.interrupt)
-    if (stop.length > 0) {
-      log($, `refused ${String(e.tool)} (${stop.map(r => r.name).join(', ')})`)
-      // The denial carries every claimed rule, the passive ones too: a rule is
-      // marked fired only when its message reached the model.
-      return { deny: denyText(eligible) }
+    const actions = await dispatch($, { kind: 'tool-match', ...(e.agentId !== undefined ? { agentId: e.agentId } : {}), hits })
+    const a = actions.find(x => x.kind === 'deny' || x.kind === 'note')
+    if (a === undefined || (a.kind !== 'deny' && a.kind !== 'note')) return next(e)
+    // Re-read after the claim: off may have landed meanwhile. A tool rule acts
+    // on the call in hand, so it needs the mod on, not a particular epoch.
+    if (!(await confirm($, s => isActive(config, s)))) {
+      await dispatch($, { kind: 'release', claim: a.claim })
+      return next(e)
+    }
+    if (a.kind === 'deny') {
+      log($, `refused ${String(e.tool)}`)
+      return { deny: a.text }
     }
     const r = await next(e)
     if (r.deny !== undefined) return r
-    return { ...r, context: [...(r.context ?? []), contextText(eligible)] }
+    return { ...r, context: [...(r.context ?? []), a.text] }
   }).catch(async ($, e, next) => {
     // Fail open: rules are guidance, not a security boundary, and a broken
     // rule must not block every tool. The error shows in /stream-rules status.
@@ -371,25 +340,27 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) await dispatch($, { kind: 'turn-start', turnId: e.turnId })
+    return next(e)
+  })
+
   on('turn.step', async function* ($, e, next) {
+    if (!isActive(config, await read($, sessionAtom))) return yield* next(e)
+    await dispatch($, { kind: 'step', ...(e.agentId !== undefined ? { agentId: e.agentId } : {}) })
     const watched = rules.some(r => r.enabled && r.question === undefined && r.scope.some(s => s.kind !== 'tool'))
-    const s0 = await read($, sessionAtom)
-    if (!isActive(config, s0)) return yield* next(e)
-    const loop = loopKey(e.agentId)
-    await update($, sessionAtom, s => bumpStep(s, loop))
     if (!watched) return yield* next(e)
-    const pending = await read($, pendingAtom)
-    if (pending !== null && pending.turnId === e.turnId) return yield* next(e)
+    if ((await read($, sessionAtom)).pending?.turnId === e.turnId) return yield* next(e)
 
     const stream = next(e)
     const buffers = new Map<string, string>()
     const handled = new Set<string>()
     let withheld: TurnStepChunk[] | null = null
     let aborted: Promise<boolean> | null = null
-    let abortFailed = false
+    let resume = false
     for await (const c of stream) {
       if (withheld !== null) {
-        if (!abortFailed) {
+        if (!resume) {
           withheld.push(c)
           continue
         }
@@ -403,22 +374,31 @@ export const register: Register = (on, options) => {
         const hits = matchText(rules, c.kind, buf).filter(r => !handled.has(r.name))
         if (hits.length > 0) {
           for (const h of hits) handled.add(h.name)
-          const d = await decideProse($, e.turnId, e.agentId, hits)
-          if (d.kind === 'remind') await appendReminder($, reminderText(d.rules), e.agentId)
-          if (d.kind === 'stop') {
-            log($, `stopped the reply (${d.rules.map(r => r.name).join(', ')})`)
-            withheld = [c]
-            aborted = $.turn.abort({ turnId: e.turnId }).then(
-              () => true,
-              async (err: unknown) => {
-                abortFailed = true
-                await update($, pendingAtom, p => (p?.id === d.pendingId ? null : p))
-                await recordError($, `could not stop the turn (${errText(err)}); the reply went on and a reminder was added`)
-                await appendReminder($, reminderText(d.rules), undefined)
-                return false
-              },
-            )
-            continue
+          const actions = await dispatch($, { kind: 'match', turnId: e.turnId, ...(e.agentId !== undefined ? { agentId: e.agentId } : {}), hits, pendingId: `p${++counter}` })
+          await perform($, actions)
+          const stop = actions.find(x => x.kind === 'abort')
+          if (stop !== undefined && stop.kind === 'abort') {
+            // Last check before the abort: the claim's await may have let a newer prompt or off land.
+            const owned = await confirm($, s => s.pending?.id === stop.pendingId && isCurrent(config, s, stop.epoch))
+            if (!owned) {
+              await releaseClaim($, stop.claim, 'a stop lost its owner before the abort')
+            } else {
+              log($, 'stopped the reply')
+              withheld = [c]
+              const pendingId = stop.pendingId
+              aborted = $.turn.abort({ turnId: e.turnId }).then(
+                async () => {
+                  await perform($, await dispatch($, { kind: 'abort-result', pendingId, ok: true }))
+                  return true
+                },
+                async (err: unknown) => {
+                  resume = true
+                  await perform($, await dispatch($, { kind: 'abort-result', pendingId, ok: false, error: errText(err) }))
+                  return false
+                },
+              )
+              continue
+            }
           }
         }
       }
@@ -429,26 +409,10 @@ export const register: Register = (on, options) => {
     }
   })
 
-  on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined) await update($, sessionAtom, s => ({ ...s, turn: { id: e.turnId, epoch: s.epoch } }))
-    return next(e)
-  })
-
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
-    const p = await read($, pendingAtom)
-    if (p !== null && p.turnId === e.turnId) {
-      const id = p.id
-      $.clock.after(0, () => sendCorrection($, id))
-    } else if (e.reason === 'answer' && e.answer.trim() !== '' && rules.some(r => r.enabled && r.question !== undefined)) {
-      const s = await read($, sessionAtom)
-      // Judge only an answer whose turn started under the current epoch.
-      if (isActive(config, s) && s.turn !== null && s.turn.id === e.turnId && s.turn.epoch === s.epoch) {
-        const answer = e.answer
-        const epoch = s.epoch
-        $.clock.after(0, () => judge($, answer, epoch).catch(err => log($, `judging failed: ${errText(err)}`)))
-      }
-    }
+    const hasJudged = rules.some(r => r.enabled && r.question !== undefined)
+    await perform($, await dispatch($, { kind: 'turn-complete', turnId: e.turnId, reason: e.reason, answer: e.answer, hasJudged }))
     return next(e)
   })
 }

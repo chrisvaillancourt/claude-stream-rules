@@ -12,7 +12,7 @@ const NO_RM = "---\ndescription: No rm -rf\ncondition: 'rm\\s+-rf'\nscope: ['too
 const NOTE_TS = "---\ncondition: ': any\\b'\nscope: ['tool:Edit(*.ts)']\ninterrupt: false\n---\nPrefer unknown.\n"
 const JUDGED = '---\ndescription: Show the test output\nquestion: Does the reply claim tests passed without showing output?\n---\nPaste the test output.\n'
 
-type Opts = { files?: Record<string, string>; abortFails?: boolean; judge?: (prompt: string) => ModelCompleteResult | Promise<ModelCompleteResult>; messages?: SessionMessage[] }
+type Opts = { files?: Record<string, string>; abortFails?: boolean; toolDenyFirst?: boolean; judge?: (prompt: string) => ModelCompleteResult | Promise<ModelCompleteResult>; messages?: SessionMessage[] }
 
 /** The engine beneath the plugin. `stream` sets the chunks the next model request yields. */
 const world = (on: On, opts: Opts = {}) => {
@@ -72,6 +72,7 @@ const world = (on: On, opts: Opts = {}) => {
   const ran: string[] = []
   on('tool.call', ($, e) => {
     ran.push(String(e.tool))
+    if (opts.toolDenyFirst && ran.length === 1) return { deny: 'Permission refused.' }
     return { result: 'ok', text: 'ok' }
   })
   const completions: string[] = []
@@ -95,6 +96,13 @@ const world = (on: On, opts: Opts = {}) => {
     stream: (c: TurnStepChunk[]) => (chunks = c),
     yielded,
   }
+}
+
+/** A promise and the function that settles it (Promise.withResolvers, which the es2023 lib lacks). */
+function gate(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => undefined
+  const promise = new Promise<void>(r => (resolve = r))
+  return { promise, resolve }
 }
 
 const start = ($: any) => $.session.start({ cwd: CWD, surface: null, isInteractive: false })
@@ -267,7 +275,7 @@ describe('pending corrections', () => {
     await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: true, reason: 'aborted' })
     await w.clock.settle()
     expect(w.submits).toEqual([])
-    expect(w.logs.join('\n')).toContain('dropped a pending correction')
+    expect(w.logs.join('\n')).toContain('dropped the correction for banana (the mod reloaded')
   })
 })
 
@@ -532,5 +540,183 @@ describe('lifecycle and review regressions', () => {
     await turn($, w, 't1', [text('apple')])
     await turn($, w, 't2', [text('banana')])
     expect(w.appended().map(x => x.message.content).flat()).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'text', text: expect.stringContaining('Rule "constructor"') })]))
+  })
+})
+
+describe('ownership interleavings (round 2)', () => {
+  test('a newer skill prompt invalidates an in-flight judgment', { options: { judgeAction: 'correct' } }, async ($, on) => {
+    const w = world(on, {
+      files: { [`${USER_DIR}/judged.md`]: JUDGED },
+      judge: async () => {
+        await $.prompt.submit({ text: '/review', wait: false, origin: { kind: 'composer' }, command: { name: 'review', args: '' } })
+        return { isAnswered: true, text: 'yes', usage: USAGE }
+      },
+    })
+    await start($)
+    await turn($, w, 't1', [text('All tests pass.')])
+    expect(w.submits).toEqual(['/review'])
+  })
+
+  test('a newer skill prompt receives a fresh correction cap', async ($, on) => {
+    const w = world(on, { files: { [`${USER_DIR}/banana.md`]: BANANA.replace('scope: [text]', 'scope: [text]\nrepeat: always') } })
+    await start($)
+    await turn($, w, 't1', [text('banana')], 'aborted')
+    await turn($, w, 't2', [text('banana')], 'aborted')
+    await $.prompt.submit({ text: '/review', wait: false, origin: { kind: 'composer' }, command: { name: 'review', args: '' } })
+    await turn($, w, 't3', [text('banana')], 'aborted')
+    expect(w.aborts).toEqual(['t1', 't2', 't3'])
+  })
+
+  test('a background result does not disable interruption for the running task', async ($, on) => {
+    const w = world(on, { files: { [`${USER_DIR}/banana.md`]: BANANA } })
+    await start($)
+    await $.turn.start({ text: 'finish the work', turnId: 't1' })
+    await $.prompt.submit({ text: 'Background task completed.', wait: false, origin: { kind: 'task-notification' }, turnId: 't1', isMeta: true })
+    w.stream([text('banana')])
+    await step($, 't1')
+    expect(w.aborts).toEqual(['t1'])
+  })
+
+  test('a teammate report does not disable interruption for the running task', async ($, on) => {
+    const w = world(on, { files: { [`${USER_DIR}/banana.md`]: BANANA } })
+    await start($)
+    await $.turn.start({ text: 'finish the work', turnId: 't1' })
+    await $.prompt.submit({ text: 'The delegated work is complete.', wait: false, origin: { kind: 'peer-send-message' }, turnId: 't1', isMeta: true })
+    w.stream([text('banana')])
+    await step($, 't1')
+    expect(w.aborts).toEqual(['t1'])
+  })
+
+  test('a task notification does not discard a pending correction', async ($, on) => {
+    const w = world(on, { files: { [`${USER_DIR}/banana.md`]: BANANA } })
+    await start($)
+    await $.turn.start({ text: 'finish the work', turnId: 't1' })
+    w.stream([text('banana')])
+    await step($, 't1')
+    await $.prompt.submit({ text: 'Background task completed.', wait: false, origin: { kind: 'task-notification' }, turnId: 't1', isMeta: true })
+    await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: true, reason: 'aborted' })
+    await w.clock.settle()
+    expect(w.submits.join('\n')).toContain('Say fruit instead.')
+  })
+
+  test('off after a judgment claim but before delivery still prevents the correction', { options: { judgeAction: 'correct' } }, async ($, on) => {
+    const w = world(on, { files: { [`${USER_DIR}/judged.md`]: JUDGED }, judge: () => ({ isAnswered: true, text: 'yes', usage: USAGE }) })
+    const { promise: claimed, resolve: claimReached } = gate()
+    const { promise: resume, resolve: release } = gate()
+    let held = false
+    on('state.set', { plugin: 'stream-rules', key: 'session' }, async ($, e, next) => {
+      const result = await next(e)
+      if (!held && e.value.value.corrections === 1) {
+        held = true
+        claimReached()
+        await resume
+      }
+      return result
+    })
+    await start($)
+    const running = turn($, w, 't1', [text('All tests pass.')])
+    await claimed
+    await cmd($, 'off')
+    release()
+    await running
+    expect(w.submits).toEqual([])
+  })
+
+  test('newer input after a prose claim is checked before aborting', async ($, on) => {
+    const w = world(on, { files: { [`${USER_DIR}/banana.md`]: BANANA } })
+    const { promise: claimed, resolve: claimReached } = gate()
+    const { promise: resume, resolve: release } = gate()
+    let held = false
+    on('state.set', { plugin: 'stream-rules', key: 'session' }, async ($, e, next) => {
+      const result = await next(e)
+      if (!held && e.value.value.corrections === 1) {
+        held = true
+        claimReached()
+        await resume
+      }
+      return result
+    })
+    await start($)
+    const running = turn($, w, 't1', [text('banana')], 'aborted')
+    await claimed
+    await $.prompt.submit({ text: 'New task.', wait: false, origin: { kind: 'composer' } })
+    release()
+    await running
+    expect(w.aborts).toEqual([])
+    expect(w.submits).toEqual(['New task.'])
+  })
+
+  test('newer input after a judgment claim but before delivery adds no reminder', async ($, on) => {
+    const w = world(on, { files: { [`${USER_DIR}/judged.md`]: JUDGED }, judge: () => ({ isAnswered: true, text: 'yes', usage: USAGE }) })
+    const { promise: claimed, resolve: claimReached } = gate()
+    const { promise: resume, resolve: release } = gate()
+    let held = false
+    on('state.set', { plugin: 'stream-rules', key: 'session' }, async ($, e, next) => {
+      const result = await next(e)
+      const fired = e.value.value.fired as Record<string, Record<string, number>>
+      if (!held && fired.main?.judged !== undefined) {
+        held = true
+        claimReached()
+        await resume
+      }
+      return result
+    })
+    await start($)
+    const running = turn($, w, 't1', [text('All tests pass.')])
+    await claimed
+    await $.prompt.submit({ text: 'New task.', wait: false, origin: { kind: 'composer' } })
+    release()
+    await running
+    expect(w.appended()).toEqual([])
+  })
+
+  test('when a superseded claim skips the abort, the reply goes on whole', async ($, on) => {
+    const w = world(on, { files: { [`${USER_DIR}/banana.md`]: BANANA } })
+    const { promise: claimed, resolve: claimReached } = gate()
+    const { promise: resume, resolve: release } = gate()
+    let held = false
+    on('state.set', { plugin: 'stream-rules', key: 'session' }, async ($, e, next) => {
+      const result = await next(e)
+      if (!held && e.value.value.corrections === 1) {
+        held = true
+        claimReached()
+        await resume
+      }
+      return result
+    })
+    await start($)
+    w.stream([text('a banana'), text(' split')])
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    const out = step($, 't1')
+    await claimed
+    await $.prompt.submit({ text: 'New task.', wait: false, origin: { kind: 'composer' } })
+    release()
+    expect(shown(await out)).toBe('a banana split')
+    expect(w.aborts).toEqual([])
+  })
+
+  test('a scheduled trigger supersedes a pending correction', async ($, on) => {
+    const w = world(on, { files: { [`${USER_DIR}/banana.md`]: BANANA } })
+    await start($)
+    w.stream([text('banana')])
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await step($, 't1')
+    await $.prompt.submit({ text: 'loop tick', wait: false, origin: { kind: 'scheduled-trigger' } })
+    await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: true, reason: 'aborted' })
+    await w.clock.settle()
+    expect(w.submits).toEqual(['loop tick'])
+  })
+
+  test('querying status neither supersedes correction nor resets the cap', async ($, on) => {
+    const w = world(on, { files: { [`${USER_DIR}/banana.md`]: BANANA.replace('scope: [text]', 'scope: [text]\nrepeat: always') } })
+    await start($)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    w.stream([text('banana')])
+    await step($, 't1')
+    expect((await cmd($, 'status')).text).toContain('1 of 2 corrections')
+    await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: true, reason: 'aborted' })
+    await w.clock.settle()
+    expect(w.submits).toHaveLength(1)
+    expect((await cmd($, 'status')).text).toContain('1 of 2 corrections')
   })
 })

@@ -43,11 +43,21 @@ export type Config = {
   draftModel: string
 }
 
+/** A rule firing that was claimed: per rule, the value it replaced, so an undelivered claim can be released. */
+export type Claim = { loop: string; at: number; prior: Record<string, number | null> }
+
+/**
+ * A correction waiting for its turn to end. `aborting` until `$.turn.abort`
+ * answers, then `aborted`; the corrective prompt is sent after the turn's
+ * `turn.complete`, only while `epoch` is still the session's.
+ */
+export type Pending = { id: string; turnId: string; epoch: number; rules: string[]; text: string; reminder: string; claim: Claim; phase: 'aborting' | 'aborted' }
+
 /** What the mod keeps for the session. Lives in $.state, so it survives a hot reload. */
 export type Session = {
   /** A /stream-rules on|off override for this session; null follows the `enabled` option. */
   mode: Mode | null
-  /** Corrective turns submitted since the last prompt that wasn't this mod's. */
+  /** Corrective turns submitted since the last superseding prompt. */
   corrections: number
   /** The last error a hook recorded (a guard that failed open, a refused append). */
   lastError: string | null
@@ -56,17 +66,15 @@ export type Session = {
   /** Per loop: model responses (turn.step calls) seen. */
   steps: Record<string, number>
   /**
-   * Who owns follow-up work. Bumped by every prompt that isn't this mod's,
-   * by /stream-rules on|off, and by /clear: a correction or a judgment made
-   * under an older epoch is dropped instead of delivered.
+   * Who owns follow-up work. A superseding prompt, /stream-rules on|off and
+   * /clear start a new epoch; work owned by an older one is dropped.
    */
   epoch: number
   /** The running (or last) main-loop turn and the epoch it started under. */
   turn: { id: string; epoch: number } | null
+  /** The correction in flight, if any. */
+  pending: Pending | null
 }
-
-/** A correction waiting for its turn to end: the turn it stopped, the rules that fired and the prompt to send. */
-export type Pending = { id: string; turnId: string; rules: string[]; text: string; epoch: number }
 
 /** A drafted rule waiting for `/stream-rules-draft save`. */
 export type Draft = { name: string; text: string }
@@ -75,7 +83,6 @@ declare module 'claude-code' {
   interface PluginState {
     'stream-rules': {
       session: Shaped<Session>
-      pending: Shaped<Pending | null>
       draft: Shaped<Draft | null>
     }
   }

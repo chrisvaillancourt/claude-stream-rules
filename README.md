@@ -11,7 +11,15 @@ It is a partial port of oh-my-pi's "time traveling stream rules" to the Claude C
 - **Replies in subagents**: a subagent's turn can't be cancelled from a mod, so a match adds the rule as a reminder the subagent reads on its next request. Non-interrupting rules do the same on the main conversation.
 - **Judged rules** (`question`): after a main-conversation turn ends with an answer, a cheap model is asked the rule's yes/no question about the final answer. A yes adds the rule as a reminder for the next request (or, with `judgeAction: correct`, starts a corrective turn). Off unless a rule has a `question`.
 - **Bounds**: at most `maxCorrections` corrective turns per prompt you send; each rule's `repeat` policy keeps one rule from firing over and over.
-- **Your newer input wins.** A correction or a judged rule's follow-up belongs to the prompt it came from. If you send another prompt (even while the turn is still running), run `/stream-rules on|off`, or `/clear` before it is delivered, it is dropped and logged, never sent into the new task.
+- **Your newer input wins.** A correction or a judged rule's follow-up belongs to the prompt it came from. When new work arrives before it is delivered, or you run `/stream-rules on|off` or `/clear`, it is dropped and logged, never sent into the new task. What counts as new work:
+
+  | Arrives | Effect on a pending correction or judgment |
+  | --- | --- |
+  | A prompt you type or send (terminal, `claude -p`/SDK, Remote Control, Slack and other channels) | dropped; the corrections count starts over |
+  | Any slash command except `/stream-rules` and `/stream-rules-draft` (skills and prompt commands start model work) | dropped; count starts over |
+  | A scheduled task or `/loop` firing, another plugin's prompt, a coordinator hand-off, anything unrecognized | dropped; count starts over |
+  | A background task's notification, a teammate's or another session's report, an observer's update | kept: it is context for the work in hand |
+  | This mod's own corrective prompt | kept |
 - It never writes a rule file on its own, never edits your settings, and never puts rules in the system prompt (they cost no tokens until one fires).
 
 ## Rule files
