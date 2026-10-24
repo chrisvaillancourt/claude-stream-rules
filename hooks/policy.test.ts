@@ -17,6 +17,8 @@ import {
   parseDraftArgs,
   parseVerdict,
   reminderText,
+  isBypass,
+  noteRouting,
   statusText,
 } from './policy'
 import { parseRule } from './rules'
@@ -37,7 +39,10 @@ describe('options and commands', () => {
       judgeMaxPerTurn: 3,
       judgeAction: 'remind',
       draftModel: 'haiku',
+      toolRouting: false,
     })
+    expect(configFrom({ toolRouting: true }).toolRouting).toBe(true)
+    expect(configFrom({ toolRouting: 'yes' }).toolRouting).toBe(false)
     const c = configFrom({ enabled: false, maxCorrections: -1, judgeMaxPerTurn: 2.7, judgeAction: 'correct', judgeModel: ' ' })
     expect(c.enabled).toBe(false)
     expect(c.maxCorrections).toBe(0)
@@ -148,5 +153,33 @@ describe('text the model is given', () => {
     expect(t).toContain('off (set for this session)')
     expect(t).toContain('3 rules loaded, 1 file failed')
     expect(t).toContain('1 of 2 corrections used')
+  })
+})
+
+describe('tool routing', () => {
+  test('the bypass needs the exact prefix and a reason of 1 to 240 characters', async () => {
+    expect(isBypass({ description: '[tool-routing bypass] need bytes' })).toBe(true)
+    expect(isBypass({ description: `[tool-routing bypass] ${'x'.repeat(240)}` })).toBe(true)
+    expect(isBypass({ description: `[tool-routing bypass] ${'x'.repeat(241)}` })).toBe(false)
+    expect(isBypass({ description: '[tool-routing bypass]  ' })).toBe(false)
+    expect(isBypass({ description: '[tool-routing bypass]x' })).toBe(false)
+    expect(isBypass({ description: '[Tool-routing bypass] x' })).toBe(false)
+    expect(isBypass({ description: 'x [tool-routing bypass] y' })).toBe(false)
+    expect(isBypass({ command: 'cat a' })).toBe(false)
+    expect(isBypass(null)).toBe(false)
+  })
+
+  test('parseArgs reads test-tool Bash <command>, keeping the command whole', async () => {
+    expect(parseArgs("test-tool Bash cat 'a b' | wc -l")).toEqual({ kind: 'test-tool', command: "cat 'a b' | wc -l" })
+    expect(parseArgs('test-tool bash ls')).toEqual({ kind: 'test-tool', command: 'ls' })
+    expect(parseArgs('test-tool Read x').kind).toBe('help')
+    expect(parseArgs('test-tool').kind).toBe('help')
+  })
+
+  test('routing counts never hold command text, and limit keeps the last unsupported reason', async () => {
+    let s = noteRouting(INITIAL, 'unsupported', 'a heredoc')
+    s = noteRouting(s, 'limit', 'more than 256 commands')
+    s = noteRouting(s, 'bypassed')
+    expect(s.routing).toEqual({ unsupported: 1, limit: 1, bypassed: 1, lastReason: 'a heredoc' })
   })
 })

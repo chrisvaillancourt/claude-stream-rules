@@ -14,6 +14,7 @@ import {
   parseRule,
   projectTool,
 } from './rules'
+import { TOOL_ROUTING } from './ruleset'
 
 const file = (front: string, body = 'Do the right thing.') => `---\n${front}\n---\n${body}\n`
 
@@ -266,5 +267,30 @@ describe('routing rules (matcher)', () => {
       'tool-routing-files:project:false:bash-native-files',
       'tool-routing-read:user:false:bash-native-read',
     ])
+  })
+})
+
+describe('the bundled ruleset', () => {
+  test('each file loads as a bundled routing rule with a short message that names its tool', async () => {
+    const loaded = Object.entries(TOOL_ROUTING).map(([name, text]) => {
+      const r = parseRule(text, name, 'bundled', `/plugin/${name}`)
+      if ('error' in r) throw new Error(`${name}: ${r.error}`)
+      return r.rule
+    })
+    expect(loaded.map(r => `${r.name}:${r.matcher}`)).toEqual([
+      'tool-routing-read:bash-native-read',
+      'tool-routing-edit:bash-native-edit',
+      'tool-routing-search:bash-native-search',
+      'tool-routing-files:bash-native-files',
+    ])
+    for (const r of loaded) {
+      expect(r.interrupt).toBe(true)
+      expect(r.body.length).toBeLessThan(600)
+      expect(r.body).toContain(`${targetOf(r.matcher!)} tool`)
+      expect(r.body).toContain('"[tool-routing bypass] "')
+      expect(/thinking|reasoning/i.test(r.body)).toBe(false)
+    }
+    const total = loaded.reduce((n, r) => n + r.body.length + r.description.length, 0)
+    expect(total).toBeLessThan(2048)
   })
 })

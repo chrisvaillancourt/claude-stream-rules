@@ -13,26 +13,31 @@ import {
   extractDraft,
   firedAt,
   isActive,
+  isBypass,
   isEligible,
   judgePrompt,
   listText,
   parseArgs,
   parseDraftArgs,
   parseVerdict,
+  noteRouting,
   recentContext,
+  routingStatusText,
   stepsOf,
   statusText,
   testText,
+  testToolText,
 } from './policy'
-import { compile, matchText, matchTool, mergeRules, parseRule } from './rules'
+import { compile, isRouting, matchText, matchToolCall, mergeRules, parseRule, targetOf } from './rules'
 import type { Rule } from './rules'
+import { TOOL_ROUTING } from './ruleset'
 import type { Claim, Config, LoadError, RuleSource, RuleSpec, Session } from '../types'
 
 const NAME = 'stream-rules'
 
 // Change a shape tag when its stored type changes: a value an older version
 // stored (it outlives a hot reload) then reads as the initial value.
-const sessionAtom = atom({ plugin: 'stream-rules', key: 'session' } as const, INITIAL, { shape: 'session-4' })
+const sessionAtom = atom({ plugin: 'stream-rules', key: 'session' } as const, INITIAL, { shape: 'session-5' })
 const draftAtom = atom({ plugin: 'stream-rules', key: 'draft' } as const, null, { shape: 'draft-1' })
 
 // Module variables reset on a hot reload; register and session.start run again then.
@@ -72,6 +77,14 @@ function ruleDirs(): { dir: string; source: RuleSource }[] {
 async function loadRules($: EngineInterface) {
   const specs: RuleSpec[] = []
   const errors: LoadError[] = []
+  if (config.toolRouting) {
+    for (const [name, text] of Object.entries(TOOL_ROUTING)) {
+      const path = `${$.plugin.root}/hooks/ruleset.ts#${name}`
+      const r = parseRule(text, name, 'bundled', path)
+      if ('error' in r) errors.push({ path, error: r.error })
+      else specs.push(r.rule)
+    }
+  }
   for (const { dir, source } of ruleDirs()) {
     let names: string[] = []
     try {
@@ -260,6 +273,45 @@ async function startSession($: EngineInterface, sessionCwd: string) {
 
 const ignore = () => undefined
 
+/** The session's tool names, or null when the list can't be had. */
+async function toolNames($: EngineInterface): Promise<string[] | null> {
+  try {
+    return (await $.tool.list()).map(t => t.name)
+  } catch {
+    return null
+  }
+}
+
+/** Counts a routing diagnostic while the mod is on. Best effort: never throws. */
+async function countRouting($: EngineInterface, kind: 'unsupported' | 'limit' | 'bypassed', reason?: string) {
+  try {
+    await update($, sessionAtom, s => (isActive(config, s) ? noteRouting(s, kind, reason) : s))
+  } catch {
+    // nothing to do
+  }
+}
+
+/**
+ * The hits that may act on this call: routing rules go when the call carries
+ * the bypass, and when their target tool isn't in the session's tool list
+ * (never point the model to a tool it doesn't have).
+ */
+async function actingHits($: EngineInterface, hits: Rule[], input: unknown): Promise<Rule[]> {
+  if (!hits.some(isRouting)) return hits
+  const ordinary = hits.filter(r => !isRouting(r))
+  if (isBypass(input)) {
+    await countRouting($, 'bypassed')
+    log($, 'a Bash call used the tool-routing bypass')
+    return ordinary
+  }
+  const tools = await toolNames($)
+  if (tools === null) {
+    await recordError($, 'could not list the tools; tool routing let the call run')
+    return ordinary
+  }
+  return hits.filter(r => !isRouting(r) || tools.includes(targetOf(r.matcher!)))
+}
+
 export const register: Register = (on, options) => {
   config = configFrom(options)
 
@@ -296,7 +348,9 @@ export const register: Register = (on, options) => {
     if (cmd.kind === 'reset') await update($, sessionAtom, s => ({ ...s, fired: {}, lastError: null }))
     if (cmd.kind === 'list') return { text: listText(rules, loadErrors) }
     if (cmd.kind === 'test') return { text: testText(rules, cmd.text) }
-    return { text: statusText(config, await read($, sessionAtom), rules.length, loadErrors.length) }
+    if (cmd.kind === 'test-tool') return { text: testToolText(rules, cmd.command, await toolNames($)) }
+    const s = await read($, sessionAtom)
+    return { text: `${statusText(config, s, rules.length, loadErrors.length)}\n${routingStatusText(config, s, rules, await toolNames($))}` }
   })
 
   on('command.run', { command: 'stream-rules-draft' }, async ($, e) => {
@@ -315,7 +369,9 @@ export const register: Register = (on, options) => {
 
   on('tool.call', async ($, e, next) => {
     if (rules.length === 0) return next(e)
-    const hits = matchTool(rules, String(e.tool), e)
+    const found = matchToolCall(rules, String(e.tool), e)
+    if (found.analysis !== undefined && found.analysis.kind !== 'supported') await countRouting($, found.analysis.kind, found.analysis.reason)
+    const hits = await actingHits($, found.hits, e)
     if (hits.length === 0) return next(e)
     const actions = await dispatch($, { kind: 'tool-match', ...(e.agentId !== undefined ? { agentId: e.agentId } : {}), hits })
     const a = actions.find(x => x.kind === 'deny' || x.kind === 'note')

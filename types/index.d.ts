@@ -46,6 +46,20 @@ export type Config = {
   judgeMaxPerTurn: number
   judgeAction: JudgeAction
   draftModel: string
+  /** Load the bundled tool-routing ruleset. */
+  toolRouting: boolean
+}
+
+/** Tool routing's diagnostics for the session: counts only, never command text. */
+export type RoutingStats = {
+  /** Bash calls the matcher didn't analyze (unsupported syntax), while a routing rule was loaded. */
+  unsupported: number
+  /** Bash calls over the size or command bound. */
+  limit: number
+  /** Bash calls that skipped routing through the bypass description. */
+  bypassed: number
+  /** Why the last unanalyzed call wasn't analyzed (a syntax name, never the command). */
+  lastReason: string | null
 }
 
 /** A rule firing that was claimed: per rule, the value it replaced, so an undelivered claim can be released. */
@@ -79,6 +93,8 @@ export type Session = {
   turn: { id: string; epoch: number } | null
   /** The correction in flight, if any. */
   pending: Pending | null
+  /** Tool routing's counts for this conversation; reset by /clear. */
+  routing: RoutingStats
 }
 
 /** A drafted rule waiting for `/stream-rules-draft save`. */

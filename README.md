@@ -28,7 +28,7 @@ Rules are read when a session starts (and on `/stream-rules reload`) from:
 
 - `~/.claude/stream-rules/*.md`: yours, for every project.
 - `<project>/.claude/stream-rules/*.md`: the project's. A project rule with the same name replaces your own.
-- With the `toolRouting` option on, the mod's own `rulesets/tool-routing/*.md` too, below both: a rule of yours with the same name replaces a bundled one.
+- With the `toolRouting` option on, the mod's four bundled routing rules (in `hooks/ruleset.ts`; `/stream-rules list` prints their text) too, below both: a rule of yours with the same name replaces a bundled one.
 
 They are deliberately not in `.claude/rules/`, which Claude Code loads into the prompt itself.
 

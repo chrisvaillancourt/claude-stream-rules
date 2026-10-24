@@ -1,9 +1,33 @@
 // Pure decisions and text: no `$`, no I/O. register.ts wires them to events.
-import type { Config, LoadError, Mode, RuleSpec, Session } from '../types'
-import { matchText, matchTool, projectTool } from './rules'
+import type { Config, LoadError, Mode, RoutingStats, RuleSpec, Session } from '../types'
+import type { Classification } from './bash'
+import { isRouting, matchText, matchTool, matchToolCall, projectTool, targetOf } from './rules'
 import type { Rule } from './rules'
 
-export const INITIAL: Session = { mode: null, corrections: 0, lastError: null, fired: {}, steps: {}, epoch: 0, turn: null, pending: null }
+export const NO_ROUTING: RoutingStats = { unsupported: 0, limit: 0, bypassed: 0, lastReason: null }
+
+export const INITIAL: Session = { mode: null, corrections: 0, lastError: null, fired: {}, steps: {}, epoch: 0, turn: null, pending: null, routing: NO_ROUTING }
+
+/** The Bash `description` prefix that skips tool routing for one call. */
+export const BYPASS_PREFIX = '[tool-routing bypass] '
+/** The longest bypass reason accepted, in characters. */
+export const BYPASS_MAX_REASON = 240
+
+/** Whether a tool call's input asks to skip tool routing: the exact prefix, then a nonempty reason of at most 240 characters. */
+export function isBypass(input: unknown): boolean {
+  const d = typeof input === 'object' && input !== null ? (input as { description?: unknown }).description : undefined
+  if (typeof d !== 'string' || !d.startsWith(BYPASS_PREFIX)) return false
+  const reason = d.slice(BYPASS_PREFIX.length).trim()
+  return reason.length > 0 && reason.length <= BYPASS_MAX_REASON
+}
+
+/** Counts one routing diagnostic. `reason` is the matcher's syntax name, never command text. */
+export function noteRouting(s: Session, kind: 'unsupported' | 'limit' | 'bypassed', reason?: string): Session {
+  const r = s.routing
+  if (kind === 'bypassed') return { ...s, routing: { ...r, bypassed: r.bypassed + 1 } }
+  if (kind === 'limit') return { ...s, routing: { ...r, limit: r.limit + 1 } }
+  return { ...s, routing: { ...r, unsupported: r.unsupported + 1, lastReason: reason ?? null } }
+}
 
 /** How much of an answer one judged question sends. */
 export const JUDGE_MAX_CHARS = 32_000
@@ -26,6 +50,7 @@ export function configFrom(options: Record<string, unknown>): Config {
     judgeMaxPerTurn: count(options.judgeMaxPerTurn, 3),
     judgeAction: options.judgeAction === 'correct' ? 'correct' : 'remind',
     draftModel: model(options.draftModel),
+    toolRouting: options.toolRouting === true,
   }
 }
 
@@ -40,9 +65,10 @@ export type Command =
   | { kind: 'set'; mode: Mode }
   | { kind: 'reload' }
   | { kind: 'reset' }
+  | { kind: 'test-tool'; command: string }
   | { kind: 'help'; error?: string }
 
-export const USAGE = 'Usage: /stream-rules [status|list|test <text>|on|off|reload|reset]'
+export const USAGE = 'Usage: /stream-rules [status|list|test <text>|test-tool Bash <command>|on|off|reload|reset]'
 
 export function parseArgs(args: string): Command {
   const trimmed = args.trim()
@@ -54,6 +80,15 @@ export function parseArgs(args: string): Command {
   if (word === 'reload') return { kind: 'reload' }
   if (word === 'reset') return { kind: 'reset' }
   if (word === 'help') return { kind: 'help' }
+  if (word === 'test-tool') {
+    const m = /^\S+\s+(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed)
+    const tool = m?.[1]
+    const command = m?.[2]?.trim() ?? ''
+    if (tool === undefined) return { kind: 'help', error: 'test-tool needs a command: /stream-rules test-tool Bash <command>' }
+    if (tool.toLowerCase() !== 'bash') return { kind: 'help', error: 'test-tool checks Bash commands only: /stream-rules test-tool Bash <command>' }
+    if (command === '') return { kind: 'help', error: 'test-tool needs a command: /stream-rules test-tool Bash <command>' }
+    return { kind: 'test-tool', command }
+  }
   if (word === 'test') {
     const text = trimmed.slice(first.length).trim()
     return text === '' || rest.length === 0 ? { kind: 'help', error: 'test needs a text: /stream-rules test <text>' } : { kind: 'test', text }
@@ -230,16 +265,76 @@ export function statusText(config: Config, s: Session, rules: number, errors: nu
   return lines.join('\n')
 }
 
+const ROUTE_LABEL: Record<string, string> = { 'bash-native-read': 'read', 'bash-native-edit': 'edit', 'bash-native-search': 'search', 'bash-native-files': 'file' }
+
+/** Whether a routing rule's target tool is in the session's tool list (`null`: the list failed, so no). */
+export const targetAvailable = (r: RuleSpec, tools: readonly string[] | null): boolean => r.matcher === undefined || (tools !== null && tools.includes(targetOf(r.matcher)))
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
+
+/** Tool routing's lines for `/stream-rules status`. `tools`: the session's tool names, or null when listing failed. */
+export function routingStatusText(config: Config, s: Session, rules: readonly RuleSpec[], tools: readonly string[] | null): string {
+  const routing = rules.filter(isRouting)
+  const head = `Tool routing: ${config.toolRouting ? 'on' : 'off'} (toolRouting option)`
+  if (routing.length === 0) return config.toolRouting ? `${head}, but no routing rule is loaded.` : `${head}.`
+  const lines = [config.toolRouting ? `${head}.` : `${head}; your own routing rules still apply.`]
+  const enabled = routing.filter(r => r.enabled)
+  const active = enabled.filter(r => targetAvailable(r, tools))
+  lines.push(`  active: ${active.length === 0 ? 'none' : active.map(r => `${r.name} (${targetOf(r.matcher!)})`).join(', ')}`)
+  if (tools === null) lines.push('  could not list the tools, so no routing rule is acting')
+  else {
+    for (const r of enabled.filter(x => !targetAvailable(x, tools))) {
+      lines.push(`  ${targetOf(r.matcher!)} tool not available on this Claude Code; ${ROUTE_LABEL[r.matcher!]} routing off`)
+    }
+  }
+  for (const r of routing.filter(x => !x.enabled)) lines.push(`  ${r.name}: disabled (${r.source})`)
+  const st = s.routing
+  const counts: string[] = []
+  if (st.unsupported > 0) counts.push(`${plural(st.unsupported, 'Bash call', 'Bash calls')} not analyzed (last: ${st.lastReason ?? 'unknown'})`)
+  if (st.limit > 0) counts.push(`${st.limit} over the size limit`)
+  if (st.bypassed > 0) counts.push(`${st.bypassed} bypassed`)
+  if (counts.length > 0) lines.push(`  this conversation: ${counts.join(', ')}`)
+  return lines.join('\n')
+}
+
+const analysisText = (a: Classification | undefined): string => {
+  if (a === undefined) return 'Matcher: no routing rule is loaded, so it did not run'
+  if (a.kind !== 'supported') return `Matcher: not analyzed (${a.reason}); routing lets it run`
+  return a.families.length > 0 ? `Matcher: understood; routes ${a.families.join(', ')}` : 'Matcher: understood; nothing in it is routed'
+}
+
+/** `/stream-rules test-tool Bash <command>`: what the matcher makes of it, which rules match, and the outcome. Repeat state and the bypass are left out. */
+export function testToolText(rules: readonly Rule[], command: string, tools: readonly string[] | null): string {
+  const { hits, analysis } = matchToolCall(rules, 'Bash', { command })
+  const lines = [analysisText(analysis)]
+  for (const h of hits) {
+    const does = h.interrupt ? 'refuses' : 'adds a note'
+    if (h.matcher === undefined) lines.push(`${h.name}: matches; ${does}`)
+    else if (targetAvailable(h, tools)) lines.push(`${h.name}: matches; ${does} and points to ${targetOf(h.matcher)}`)
+    else lines.push(`${h.name}: matches, but this session has no ${targetOf(h.matcher)} tool, so it doesn't act`)
+  }
+  const acting = hits.filter(h => targetAvailable(h, tools))
+  const ordinaryStops = acting.filter(h => h.matcher === undefined && h.interrupt)
+  const refusers = ordinaryStops.length > 0 ? ordinaryStops : acting.filter(h => h.interrupt)
+  if (refusers.length > 0) lines.push(`Would be refused by ${refusers.map(h => h.name).join(', ')}.`)
+  else if (acting.length > 0) lines.push(`Would run, with a note from ${acting.map(h => h.name).join(', ')}.`)
+  else lines.push('Would run.')
+  lines.push('(Repeat state and the bypass are not considered.)')
+  return lines.join('\n')
+}
+
 const scopeText = (r: RuleSpec) =>
   r.scope.map(s => (s.kind !== 'tool' ? s.kind : s.tool === undefined ? 'tool' : s.glob ? `tool:${s.tool}(${s.glob})` : `tool:${s.tool}`)).join(', ')
 
 export function listText(rules: readonly RuleSpec[], errors: readonly LoadError[]): string {
   const lines: string[] = []
-  if (rules.length === 0) lines.push('No rules loaded. Put rule files in ~/.claude/stream-rules/ or <project>/.claude/stream-rules/.')
+  if (rules.length === 0) lines.push('No rules loaded. Put rule files in ~/.claude/stream-rules/ or <project>/.claude/stream-rules/, or turn on the toolRouting option.')
   for (const r of rules) {
-    const kind = r.question ? 'judged' : r.interrupt ? 'stops' : 'reminds'
+    const kind = r.matcher ? (r.interrupt ? 'routes' : 'routes, as a note') : r.question ? 'judged' : r.interrupt ? 'stops' : 'reminds'
     const off = r.enabled ? '' : ' [disabled]'
     lines.push(`${r.name}${off} (${r.source}, ${kind}; ${r.question ? 'the final answer' : scopeText(r)})${r.description ? `: ${r.description}` : ''}`)
+    if (r.matcher) lines.push(`  matcher: ${r.matcher}, points to ${targetOf(r.matcher)}`)
+    if (r.source === 'bundled') lines.push(...r.body.split('\n').map(l => `  | ${l}`))
     if (r.conditions.length > 0) lines.push(`  condition: ${r.conditions.join(' | ')}`)
     if (r.question) lines.push(`  question: ${r.question}`)
   }

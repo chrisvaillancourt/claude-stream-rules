@@ -32,7 +32,10 @@
       "type": "string",
       "title": "After a judged yes",
       "description": "remind adds the rule as a reminder; correct starts a corrective turn (counts toward the corrections cap).",
-      "options": ["remind", "correct"],
+      "options": [
+        "remind",
+        "correct"
+      ],
       "default": "remind"
     },
     "draftModel": {
@@ -40,6 +43,12 @@
       "title": "Draft model",
       "description": "Model that drafts rules for /stream-rules-draft.",
       "default": "haiku"
+    },
+    "toolRouting": {
+      "type": "boolean",
+      "title": "Tool routing",
+      "description": "Refuse Bash calls that read or edit files (cat, head, sed -i...) and point the model to Read or Edit. Off by default.",
+      "default": false
     }
   },
   "author": {

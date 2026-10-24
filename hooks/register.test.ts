@@ -12,7 +12,7 @@ const NO_RM = "---\ndescription: No rm -rf\ncondition: 'rm\\s+-rf'\nscope: ['too
 const NOTE_TS = "---\ncondition: ': any\\b'\nscope: ['tool:Edit(*.ts)']\ninterrupt: false\n---\nPrefer unknown.\n"
 const JUDGED = '---\ndescription: Show the test output\nquestion: Does the reply claim tests passed without showing output?\n---\nPaste the test output.\n'
 
-type Opts = { files?: Record<string, string>; abortFails?: boolean; toolDenyFirst?: boolean; judge?: (prompt: string) => ModelCompleteResult | Promise<ModelCompleteResult>; messages?: SessionMessage[] }
+type Opts = { tools?: string[] | 'fail'; files?: Record<string, string>; abortFails?: boolean; toolDenyFirst?: boolean; judge?: (prompt: string) => ModelCompleteResult | Promise<ModelCompleteResult>; messages?: SessionMessage[] }
 
 /** The engine beneath the plugin. `stream` sets the chunks the next model request yields. */
 const world = (on: On, opts: Opts = {}) => {
@@ -70,8 +70,10 @@ const world = (on: On, opts: Opts = {}) => {
     return { text: e.text }
   })
   const ran: string[] = []
+  const inputs: unknown[] = []
   on('tool.call', ($, e) => {
     ran.push(String(e.tool))
+    inputs.push(e)
     if (opts.toolDenyFirst && ran.length === 1) return { deny: 'Permission refused.' }
     return { result: 'ok', text: 'ok' }
   })
@@ -82,6 +84,11 @@ const world = (on: On, opts: Opts = {}) => {
     return { value: await fn(e.prompt) }
   })
   on('session.messages', () => ({ value: opts.messages ?? [] }))
+  const tools = opts.tools ?? ['Bash', 'Read', 'Edit', 'Write']
+  on('tool.list', () => {
+    if (tools === 'fail') throw new Error('no tools')
+    return { value: tools.map(name => ({ name, description: name, mcp: false })) }
+  })
 
   return {
     clock,
@@ -91,6 +98,7 @@ const world = (on: On, opts: Opts = {}) => {
     aborts,
     submits,
     ran,
+    inputs,
     completions,
     appended: () => session.appended().filter(r => r.door === 'note'),
     stream: (c: TurnStepChunk[]) => (chunks = c),
@@ -727,5 +735,150 @@ describe('ownership interleavings (round 2)', () => {
     await w.clock.settle()
     expect(w.submits).toHaveLength(1)
     expect((await cmd($, 'status')).text).toContain('1 of 2 corrections')
+  })
+})
+
+describe('tool routing', () => {
+  const ON = { options: { toolRouting: true } }
+  const bash = ($: any, command: string, extra: Record<string, unknown> = {}) => $.tool.call({ tool: 'Bash', command, ...extra })
+
+  test('off by default: no bundled rule loads and cat runs', async ($, on) => {
+    const w = world(on)
+    await start($)
+    expect((await bash($, 'cat README.md')).deny).toBeUndefined()
+    expect(w.ran).toEqual(['Bash'])
+    expect((await cmd($, 'list')).text).not.toContain('tool-routing-read')
+    expect((await cmd($, 'status')).text).toContain('Tool routing: off')
+  })
+
+  test('opted in, cat is refused before it runs with a usable Read call; main loop and subagents', ON, async ($, on) => {
+    const w = world(on)
+    await start($)
+    const r = await bash($, 'cat README.md')
+    expect(r.deny).toContain('Read({ file_path: "/absolute/path/to/file", offset: 1, limit: 80 })')
+    expect(r.deny).toContain('[tool-routing bypass] ')
+    expect(r.deny).not.toContain('README.md')
+    const sub = await bash($, "sed -i '' 's/a/b/' x.md", { agentId: 'a1' })
+    expect(sub.deny).toContain('Edit({ file_path: "/absolute/path/to/file", old_string:')
+    expect(w.ran).toEqual([])
+  })
+
+  test('commands routing leaves alone reach the tool once, unchanged', ON, async ($, on) => {
+    const w = world(on)
+    await start($)
+    for (const command of ['cat README.md | wc -l', 'cat "$(pick)"', 'tail -f log', 'git status']) {
+      expect((await bash($, command)).deny).toBeUndefined()
+    }
+    expect(w.inputs.map(i => (i as { command: string }).command)).toEqual(['cat README.md | wc -l', 'cat "$(pick)"', 'tail -f log', 'git status'])
+    expect((await cmd($, 'status')).text).toContain('1 Bash call not analyzed (last: command substitution)')
+  })
+
+  test('search and file routing stay off when the session has no Grep or Glob tool', ON, async ($, on) => {
+    const w = world(on)
+    await start($)
+    expect((await bash($, 'grep foo file.txt')).deny).toBeUndefined()
+    expect((await bash($, "find src -name '*.ts'")).deny).toBeUndefined()
+    expect(w.ran).toEqual(['Bash', 'Bash'])
+    const status = (await cmd($, 'status')).text
+    expect(status).toContain('Grep tool not available on this Claude Code; search routing off')
+    expect(status).toContain('Glob tool not available on this Claude Code; file routing off')
+    expect(status).toContain('active: tool-routing-edit (Edit), tool-routing-read (Read)')
+  })
+
+  test('with a Grep tool present, search routing acts', { options: { toolRouting: true } }, async ($, on) => {
+    const w = world(on, { tools: ['Bash', 'Read', 'Edit', 'Grep', 'Glob'] })
+    await start($)
+    expect((await bash($, 'grep foo file.txt')).deny).toContain('Grep tool')
+    expect((await bash($, "find src -name '*.ts'")).deny).toContain('Glob tool')
+    expect(w.ran).toEqual([])
+  })
+
+  test('the bypass skips routing only, needs a reason of at most 240 characters, and is counted', ON, async ($, on) => {
+    const w = world(on, { files: { [`${USER_DIR}/no-rm.md`]: NO_RM } })
+    await start($)
+    expect((await bash($, 'head -c 16 a.bin && cat a.txt', { description: '[tool-routing bypass] need the exact bytes' })).deny).toBeUndefined()
+    expect((await bash($, 'cat a.txt', { description: '[tool-routing bypass]   ' })).deny).toContain('Read(')
+    expect((await bash($, 'cat a.txt', { description: `[tool-routing bypass] ${'x'.repeat(241)}` })).deny).toContain('Read(')
+    expect((await bash($, 'cat a.txt', { description: 'Show a file [tool-routing bypass] x' })).deny).toContain('Read(')
+    const rm = await bash($, 'cat a && rm -rf b', { description: '[tool-routing bypass] cleanup' })
+    expect(rm.deny).toContain('Use trash instead.')
+    expect(w.ran).toEqual(['Bash'])
+    expect((w.inputs[0] as { description: string }).description).toBe('[tool-routing bypass] need the exact bytes')
+    expect((await cmd($, 'status')).text).toContain('2 bypassed')
+    expect(w.logs.join('\n')).not.toContain('a.txt')
+  })
+
+  test('an ordinary refusal is the only message when both match', ON, async ($, on) => {
+    const noCat = "---\ndescription: No cat\ncondition: '^cat '\nscope: ['tool:Bash']\n---\nAsk first.\n"
+    world(on, { files: { [`${PROJECT_DIR}/no-cat.md`]: noCat } })
+    await start($)
+    const r = await bash($, 'cat a.txt')
+    expect(r.deny).toContain('Ask first.')
+    expect(r.deny).not.toContain('Read(')
+  })
+
+  test('a user file of the same name replaces or switches off a bundled rule', ON, async ($, on) => {
+    const off = '---\nname: tool-routing-read\nmatcher: bash-native-read\nenabled: false\n---\nOff.\n'
+    const mine = '---\nname: tool-routing-edit\nmatcher: bash-native-edit\n---\nUse Edit, please.\n'
+    const w = world(on, { files: { [`${USER_DIR}/tool-routing-read.md`]: off, [`${PROJECT_DIR}/tool-routing-edit.md`]: mine } })
+    await start($)
+    expect((await bash($, 'cat a.txt')).deny).toBeUndefined()
+    expect((await bash($, "sed -i '' s/a/b/ x")).deny).toContain('Use Edit, please.')
+    expect(w.ran).toEqual(['Bash'])
+    const list = (await cmd($, 'list')).text
+    expect(list).toContain('tool-routing-read [disabled] (user, routes')
+    expect(list).toContain('tool-routing-edit (project, routes')
+    expect(list).toContain('tool-routing-search (bundled, routes')
+    expect(list).toContain('matcher: bash-native-search, points to Grep')
+  })
+
+  test('a malformed matcher file is listed as a load error', async ($, on) => {
+    world(on, { files: { [`${USER_DIR}/bad.md`]: "---\nmatcher: bash-native-cat\ncondition: 'cat'\n---\nx\n" } })
+    await start($)
+    expect((await cmd($, 'list')).text).toContain(`${USER_DIR}/bad.md: matcher must be`)
+  })
+
+  test('/stream-rules off lets routed commands run; on brings routing back', ON, async ($, on) => {
+    const w = world(on)
+    await start($)
+    await cmd($, 'off')
+    expect((await bash($, 'cat a.txt')).deny).toBeUndefined()
+    await cmd($, 'on')
+    expect((await bash($, 'cat a.txt')).deny).toContain('Read(')
+    expect(w.ran).toEqual(['Bash'])
+  })
+
+  test('when the tool list fails, routing lets the call run and records why', ON, async ($, on) => {
+    const w = world(on, { tools: 'fail' })
+    await start($)
+    expect((await bash($, 'cat a.txt')).deny).toBeUndefined()
+    expect(w.ran).toEqual(['Bash'])
+    expect((await cmd($, 'status')).text).toContain('could not list the tools')
+  })
+
+  test('/clear resets the routing counts', ON, async ($, on) => {
+    world(on)
+    await start($)
+    await bash($, 'cat $X')
+    expect((await cmd($, 'status')).text).toContain('1 Bash call not analyzed')
+    await $.session.end({ reason: 'clear', sessionId: 'x', resume: { id: 'x' } })
+    expect((await cmd($, 'status')).text).not.toContain('not analyzed')
+  })
+
+  test('test-tool Bash reports the matcher and the outcome', ON, async ($, on) => {
+    world(on, { files: { [`${USER_DIR}/no-rm.md`]: NO_RM } })
+    await start($)
+    const read = (await cmd($, 'test-tool Bash cat README.md')).text
+    expect(read).toContain('Matcher: understood; routes read')
+    expect(read).toContain('tool-routing-read: matches; refuses and points to Read')
+    expect(read).toContain('Would be refused by tool-routing-read.')
+    const grep = (await cmd($, 'test-tool Bash grep foo a.txt')).text
+    expect(grep).toContain("tool-routing-search: matches, but this session has no Grep tool, so it doesn't act")
+    expect(grep).toContain('Would run.')
+    expect((await cmd($, 'test-tool Bash cat "$(x)"')).text).toContain('Matcher: not analyzed (command substitution); routing lets it run')
+    const rm = (await cmd($, 'test-tool Bash cat a && rm -rf b')).text
+    expect(rm).toContain('Would be refused by no-rm.')
+    expect((await cmd($, 'test-tool Edit x')).text).toContain('test-tool checks Bash commands only')
+    expect((await cmd($, 'test-tool Bash')).text).toContain('test-tool needs a command')
   })
 })
