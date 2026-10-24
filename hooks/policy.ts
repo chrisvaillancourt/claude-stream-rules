@@ -3,7 +3,7 @@ import type { Config, LoadError, Mode, RuleSpec, Session } from '../types'
 import { matchText, matchTool, projectTool } from './rules'
 import type { Rule } from './rules'
 
-export const INITIAL: Session = { mode: null, corrections: 0, lastError: null, fired: {}, steps: {} }
+export const INITIAL: Session = { mode: null, corrections: 0, lastError: null, fired: {}, steps: {}, epoch: 0, turn: null }
 
 /** How much of an answer one judged question sends. */
 export const JUDGE_MAX_CHARS = 32_000

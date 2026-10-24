@@ -39,8 +39,8 @@ const NAME = 'stream-rules'
 
 // Change a shape tag when its stored type changes: a value an older version
 // stored (it outlives a hot reload) then reads as the initial value.
-const sessionAtom = atom({ plugin: 'stream-rules', key: 'session' } as const, INITIAL, { shape: 'session-2' })
-const pendingAtom = atom({ plugin: 'stream-rules', key: 'pending' } as const, null, { shape: 'pending-1' })
+const sessionAtom = atom({ plugin: 'stream-rules', key: 'session' } as const, INITIAL, { shape: 'session-3' })
+const pendingAtom = atom({ plugin: 'stream-rules', key: 'pending' } as const, null, { shape: 'pending-2' })
 const draftAtom = atom({ plugin: 'stream-rules', key: 'draft' } as const, null, { shape: 'draft-1' })
 
 // Module variables reset on a hot reload; register and session.start run again then.
@@ -49,8 +49,6 @@ let rules: Rule[] = []
 let loadErrors: LoadError[] = []
 let cwd = ''
 let home = ''
-/** Bumped by /clear: timers started before it see a different value and stop. */
-let generation = 0
 let counter = 0
 
 /** Best effort: reporting must never throw out of a hook or a timer. */
@@ -125,8 +123,10 @@ type ProseDecision = { kind: 'none' } | { kind: 'remind'; rules: Rule[] } | { ki
 async function decideProse($: EngineInterface, turnId: string, agentId: string | undefined, hits: Rule[]): Promise<ProseDecision> {
   const loop = loopKey(agentId)
   let decision: ProseDecision = { kind: 'none' }
+  let epoch = 0
   const pendingId = `p${++counter}`
   await update($, sessionAtom, s => {
+    epoch = s.epoch
     const steps = stepsOf(s, loop)
     const eligible = hits.filter(r => isEligible(r, 'prose', firedAt(s, loop, r.name), steps))
     if (eligible.length === 0) {
@@ -134,7 +134,10 @@ async function decideProse($: EngineInterface, turnId: string, agentId: string |
       return s
     }
     const fired = markFired(s, loop, eligible.map(r => r.name))
-    const wantsStop = agentId === undefined && eligible.some(r => r.interrupt)
+    // Stop only a turn that belongs to the current epoch: one started before a
+    // newer prompt (typed mid-turn) or an on/off gets a reminder at most.
+    const owned = s.turn !== null && s.turn.id === turnId && s.turn.epoch === s.epoch
+    const wantsStop = agentId === undefined && owned && eligible.some(r => r.interrupt)
     if (wantsStop && canCorrect(config, s)) {
       decision = { kind: 'stop', rules: eligible, pendingId }
       return { ...fired, corrections: s.corrections + 1 }
@@ -144,17 +147,37 @@ async function decideProse($: EngineInterface, turnId: string, agentId: string |
   })
   const d = decision as ProseDecision
   if (d.kind === 'stop') {
-    await update($, pendingAtom, () => ({ id: pendingId, turnId, rules: d.rules.map(r => r.name), text: correctionText(d.rules) }))
+    await update($, pendingAtom, () => ({ id: pendingId, turnId, rules: d.rules.map(r => r.name), text: correctionText(d.rules), epoch }))
   }
   return d
 }
 
-/** After a stopped turn ends: send the corrective prompt, unless the pending record was replaced or dropped. */
-async function sendCorrection($: EngineInterface, id: string, gen: number) {
-  if (gen !== generation) return
+/** Whether work owned by `epoch` may still be delivered: nothing superseded it and the mod is on. */
+async function isCurrent($: EngineInterface, epoch: number): Promise<boolean> {
+  const s = await read($, sessionAtom)
+  return s.epoch === epoch && isActive(config, s)
+}
+
+/** A newer prompt, an on/off or a /clear: start a new epoch and drop the pending correction. */
+async function supersede($: EngineInterface, why: string, resetCorrections: boolean) {
+  await update($, sessionAtom, s => ({ ...s, epoch: s.epoch + 1, ...(resetCorrections ? { corrections: 0 } : {}) }))
+  const p = await read($, pendingAtom)
+  if (p !== null) {
+    await update($, pendingAtom, cur => (cur?.id === p.id ? null : cur))
+    log($, `dropped the correction for ${p.rules.join(', ')} (${why})`)
+  }
+}
+
+/** After a stopped turn ends: send the corrective prompt, unless its epoch was superseded or the mod is off. */
+async function sendCorrection($: EngineInterface, id: string) {
   const p = await read($, pendingAtom)
   if (p === null || p.id !== id) return
-  await update($, pendingAtom, () => null)
+  await update($, pendingAtom, cur => (cur?.id === id ? null : cur))
+  // Checked last, with no await between it and the submit.
+  if (!(await isCurrent($, p.epoch))) {
+    log($, `dropped the correction for ${p.rules.join(', ')} (superseded, or the mod is off)`)
+    return
+  }
   try {
     const r = await $.prompt.submit({ text: p.text })
     if (r.drop !== undefined) await recordError($, `the corrective prompt for ${p.rules.join(', ')} was dropped: ${r.drop}`)
@@ -165,7 +188,7 @@ async function sendCorrection($: EngineInterface, id: string, gen: number) {
 }
 
 /** Judged rules, after a main-loop answer: ask each question, then remind (or correct) on a yes. */
-async function judge($: EngineInterface, answer: string, gen: number) {
+async function judge($: EngineInterface, answer: string, epoch: number) {
   const s0 = await read($, sessionAtom)
   const steps = stepsOf(s0, 'main')
   const candidates = rules
@@ -178,7 +201,7 @@ async function judge($: EngineInterface, answer: string, gen: number) {
     const { system, prompt } = judgePrompt(r, answer)
     try {
       const res = await $.model.complete({ model: config.judgeModel, system, prompt, maxTokens: 64, effort: 'low', timeoutMs: 30_000 })
-      if (gen !== generation) return
+      if (!(await isCurrent($, epoch))) return
       if (!res.isAnswered) {
         log($, `judging ${r.name} failed (${res.reason}); nothing delivered`)
         continue
@@ -190,10 +213,13 @@ async function judge($: EngineInterface, answer: string, gen: number) {
       log($, `judging ${r.name} failed: ${errText(err)}`)
     }
   }
-  if (broken.length === 0 || gen !== generation) return
+  if (broken.length === 0) return
   let claimed: Rule[] = []
   let correct = false
+  // The claim rechecks ownership atomically; delivery follows it directly.
   await update($, sessionAtom, s => {
+    claimed = []
+    if (s.epoch !== epoch || !isActive(config, s)) return s
     const now = stepsOf(s, 'main')
     claimed = broken.filter(r => isEligible(r, 'prose', firedAt(s, 'main', r.name), now))
     if (claimed.length === 0) return s
@@ -274,8 +300,7 @@ export const register: Register = (on, options) => {
 
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear') {
-      generation++
-      await update($, sessionAtom, s => ({ ...INITIAL, mode: s.mode }))
+      await update($, sessionAtom, s => ({ ...INITIAL, mode: s.mode, epoch: s.epoch + 1 }))
       await update($, pendingAtom, () => null)
       await update($, draftAtom, () => null)
     }
@@ -284,14 +309,17 @@ export const register: Register = (on, options) => {
 
   on('prompt.submit', async ($, e, next) => {
     const isOurs = e.origin.kind === 'plugin' && e.origin.name === NAME
-    if (!isOurs && e.command === undefined) await update($, sessionAtom, s => (s.corrections === 0 ? s : { ...s, corrections: 0 }))
+    if (!isOurs && e.command === undefined) await supersede($, 'a newer prompt arrived', true)
     return next(e)
   }).catch(($, e, next) => next(e)) // never hold up a prompt over the counter
 
   on('command.run', { command: 'stream-rules' }, async ($, e) => {
     const cmd = parseArgs(e.args)
     if (cmd.kind === 'help') return { text: cmd.error ? `${cmd.error}\n${USAGE}` : USAGE }
-    if (cmd.kind === 'set') await update($, sessionAtom, s => ({ ...s, mode: cmd.mode }))
+    if (cmd.kind === 'set') {
+      await update($, sessionAtom, s => ({ ...s, mode: cmd.mode }))
+      await supersede($, `/stream-rules ${cmd.mode}`, false)
+    }
     if (cmd.kind === 'reload') await loadRules($)
     if (cmd.kind === 'reset') await update($, sessionAtom, s => ({ ...s, fired: {}, lastError: null }))
     if (cmd.kind === 'list') return { text: listText(rules, loadErrors) }
@@ -401,17 +429,24 @@ export const register: Register = (on, options) => {
     }
   })
 
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) await update($, sessionAtom, s => ({ ...s, turn: { id: e.turnId, epoch: s.epoch } }))
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
-    const gen = generation
     const p = await read($, pendingAtom)
     if (p !== null && p.turnId === e.turnId) {
       const id = p.id
-      $.clock.after(0, () => sendCorrection($, id, gen))
+      $.clock.after(0, () => sendCorrection($, id))
     } else if (e.reason === 'answer' && e.answer.trim() !== '' && rules.some(r => r.enabled && r.question !== undefined)) {
-      if (isActive(config, await read($, sessionAtom))) {
+      const s = await read($, sessionAtom)
+      // Judge only an answer whose turn started under the current epoch.
+      if (isActive(config, s) && s.turn !== null && s.turn.id === e.turnId && s.turn.epoch === s.epoch) {
         const answer = e.answer
-        $.clock.after(0, () => judge($, answer, gen).catch(err => log($, `judging failed: ${errText(err)}`)))
+        const epoch = s.epoch
+        $.clock.after(0, () => judge($, answer, epoch).catch(err => log($, `judging failed: ${errText(err)}`)))
       }
     }
     return next(e)

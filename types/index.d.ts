@@ -55,10 +55,18 @@ export type Session = {
   fired: Record<string, Record<string, number>>
   /** Per loop: model responses (turn.step calls) seen. */
   steps: Record<string, number>
+  /**
+   * Who owns follow-up work. Bumped by every prompt that isn't this mod's,
+   * by /stream-rules on|off, and by /clear: a correction or a judgment made
+   * under an older epoch is dropped instead of delivered.
+   */
+  epoch: number
+  /** The running (or last) main-loop turn and the epoch it started under. */
+  turn: { id: string; epoch: number } | null
 }
 
 /** A correction waiting for its turn to end: the turn it stopped, the rules that fired and the prompt to send. */
-export type Pending = { id: string; turnId: string; rules: string[]; text: string }
+export type Pending = { id: string; turnId: string; rules: string[]; text: string; epoch: number }
 
 /** A drafted rule waiting for `/stream-rules-draft save`. */
 export type Draft = { name: string; text: string }

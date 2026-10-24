@@ -380,6 +380,109 @@ describe('/stream-rules-draft', () => {
 })
 
 describe('lifecycle and review regressions', () => {
+  test('newer user input invalidates an old correction', async ($, on) => {
+    const w = world(on, { files: { [`${USER_DIR}/banana.md`]: BANANA } })
+    await start($)
+    w.stream([text('banana')])
+    await $.turn.start({ text: 'old task', turnId: 't1' })
+    await step($, 't1')
+    await $.prompt.submit({ text: 'Stop the old task; do a different task.', wait: false, origin: { kind: 'composer' } })
+    await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: true, reason: 'aborted' })
+    await w.clock.settle()
+    expect(w.submits).toEqual(['Stop the old task; do a different task.'])
+  })
+
+  test('off invalidates a pending correction', async ($, on) => {
+    const w = world(on, { files: { [`${USER_DIR}/banana.md`]: BANANA } })
+    await start($)
+    w.stream([text('banana')])
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await step($, 't1')
+    await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: true, reason: 'aborted' })
+    await cmd($, 'off')
+    await w.clock.settle()
+    expect(w.submits).toEqual([])
+  })
+
+  test('off while judging prevents a new corrective turn', { options: { judgeAction: 'correct' } }, async ($, on) => {
+    const w = world(on, {
+      files: { [`${USER_DIR}/judged.md`]: JUDGED },
+      judge: async () => {
+        await cmd($, 'off')
+        return { isAnswered: true, text: 'yes', usage: USAGE }
+      },
+    })
+    await start($)
+    await turn($, w, 't1', [text('All tests pass.')])
+    expect(w.submits).toEqual([])
+  })
+
+  test('newer input while judging prevents revision of the wrong answer', { options: { judgeAction: 'correct' } }, async ($, on) => {
+    const w = world(on, {
+      files: { [`${USER_DIR}/judged.md`]: JUDGED },
+      judge: async () => {
+        await $.prompt.submit({ text: 'New task.', wait: false, origin: { kind: 'composer' } })
+        return { isAnswered: true, text: 'yes', usage: USAGE }
+      },
+    })
+    await start($)
+    await turn($, w, 't1', [text('All tests pass.')])
+    expect(w.submits).toEqual(['New task.'])
+  })
+
+  test('off while judging adds no reminder either', async ($, on) => {
+    const w = world(on, {
+      files: { [`${USER_DIR}/judged.md`]: JUDGED },
+      judge: async () => {
+        await cmd($, 'off')
+        return { isAnswered: true, text: 'yes', usage: USAGE }
+      },
+    })
+    await start($)
+    await turn($, w, 't1', [text('All tests pass.')])
+    expect(w.appended()).toEqual([])
+  })
+
+  test('a prompt typed during the turn means its answer is not judged into the new task', async ($, on) => {
+    const w = world(on, { files: { [`${USER_DIR}/judged.md`]: JUDGED }, judge: () => ({ isAnswered: true, text: 'yes', usage: USAGE }) })
+    await start($)
+    w.stream([text('All tests pass.')])
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await step($, 't1')
+    await $.prompt.submit({ text: 'New task.', wait: false, origin: { kind: 'composer' }, turnId: 't1' })
+    await $.turn.complete({ turnId: 't1', answer: 'All tests pass.', durationMs: 1, isAborted: false, reason: 'answer' })
+    await w.clock.settle()
+    expect(w.completions).toEqual([])
+    expect(w.appended()).toEqual([])
+  })
+
+  test('off then on before the timer still drops the old correction', async ($, on) => {
+    const w = world(on, { files: { [`${USER_DIR}/banana.md`]: BANANA } })
+    await start($)
+    w.stream([text('banana')])
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await step($, 't1')
+    await cmd($, 'off')
+    await cmd($, 'on')
+    await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: true, reason: 'aborted' })
+    await w.clock.settle()
+    expect(w.submits).toEqual([])
+  })
+
+  test('/clear while judging drops the verdict', { options: { judgeAction: 'correct' } }, async ($, on) => {
+    const w = world(on, {
+      files: { [`${USER_DIR}/judged.md`]: JUDGED },
+      judge: async () => {
+        await $.session.end({ reason: 'clear', sessionId: 'x', resume: { id: 'x' } })
+        return { isAnswered: true, text: 'yes', usage: USAGE }
+      },
+    })
+    await start($)
+    await turn($, w, 't1', [text('All tests pass.')])
+    expect(w.submits).toEqual([])
+    expect(w.appended()).toEqual([])
+  })
+
   test('tool drafts do not count prose as live tool matches', async ($, on) => {
     const draft = "<rule>\n---\nname: no-any\ncondition: ': any\\b'\nscope: ['tool:Edit(*.ts)']\n---\nUse unknown.\n</rule>"
     world(on, {
