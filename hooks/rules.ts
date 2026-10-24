@@ -6,16 +6,25 @@ export type Rule = RuleSpec & { regexes: RegExp[] }
 
 const KEY = /^([A-Za-z_][\w-]*):(?:\s+(.*)|\s*)$/
 
+/** A value the frontmatter reader refuses; parseFrontmatter turns it into a load error. */
+class ValueError extends Error {}
+
+/** After a closing quote or bracket only a ` # comment` may follow. */
+function checkTail(tail: string, what: string) {
+  const t = tail.trim()
+  if (t !== '' && !t.startsWith('#')) throw new ValueError(`unexpected text after the closing ${what}: ${t}`)
+}
+
 /** Strips an unquoted ` # comment`, then reads one scalar: quoted, boolean, number or plain. */
 function scalar(raw: string): string | number | boolean {
   const s = raw.trim()
-  if (s.startsWith("'")) {
-    const end = findQuoteEnd(s, "'")
-    return s.slice(1, end).replace(/''/g, "'")
-  }
-  if (s.startsWith('"')) {
-    const end = findQuoteEnd(s, '"')
-    return s.slice(1, end).replace(/\\(["\\])/g, '$1')
+  if (s.startsWith("'") || s.startsWith('"')) {
+    const q = s[0]!
+    const end = findQuoteEnd(s, q)
+    if (end < 0) throw new ValueError(`the ${q === "'" ? 'single' : 'double'} quote is not closed (write '' for a quote inside single quotes): ${s}`)
+    checkTail(s.slice(end + 1), 'quote')
+    const inner = s.slice(1, end)
+    return q === "'" ? inner.replace(/''/g, "'") : inner.replace(/\\(["\\])/g, '$1')
   }
   const plain = s.replace(/\s+#.*$/, '').trim()
   if (plain === 'true') return true
@@ -24,7 +33,7 @@ function scalar(raw: string): string | number | boolean {
   return plain
 }
 
-/** Index of the closing quote of a string starting at 0; the string's length when unclosed. */
+/** Index of the closing quote of a string starting at 0; -1 when unclosed. */
 function findQuoteEnd(s: string, q: string): number {
   for (let i = 1; i < s.length; i++) {
     if (q === "'" && s[i] === "'" && s[i + 1] === "'") {
@@ -37,7 +46,7 @@ function findQuoteEnd(s: string, q: string): number {
     }
     if (s[i] === q) return i
   }
-  return s.length
+  return -1
 }
 
 /** Splits `a, 'b, c', d` on the commas outside quotes. */
@@ -76,7 +85,9 @@ function value(raw: string): Field {
   const s = raw.trim()
   if (s.startsWith('[')) {
     const close = s.lastIndexOf(']')
-    return splitList(s.slice(1, close < 0 ? s.length : close))
+    if (close < 0) throw new ValueError(`the list is not closed with ]: ${s}`)
+    checkTail(s.slice(close + 1), ']')
+    return splitList(s.slice(1, close))
   }
   return scalar(s)
 }
@@ -95,16 +106,21 @@ export function parseFrontmatter(text: string): { fields: Record<string, Field>;
     if (!m) return { error: `frontmatter line ${i + 1} is not "key: value": ${line.trim()}` }
     const key = m[1]!
     const rest = m[2] ?? ''
-    if (rest.trim() !== '' && !rest.trim().startsWith('#')) {
-      fields[key] = value(rest)
-      continue
+    try {
+      if (rest.trim() !== '' && !rest.trim().startsWith('#')) {
+        fields[key] = value(rest)
+        continue
+      }
+      const items: string[] = []
+      while (i + 1 < end && /^\s+-\s+/.test(lines[i + 1]!)) {
+        i++
+        items.push(String(scalar(lines[i]!.replace(/^\s+-\s+/, ''))))
+      }
+      fields[key] = items.length > 0 ? items : ''
+    } catch (err) {
+      if (err instanceof ValueError) return { error: `frontmatter line ${i + 1}: ${err.message}` }
+      throw err
     }
-    const items: string[] = []
-    while (i + 1 < end && /^\s+-\s+/.test(lines[i + 1]!)) {
-      i++
-      items.push(String(scalar(lines[i]!.replace(/^\s+-\s+/, ''))))
-    }
-    fields[key] = items.length > 0 ? items : ''
   }
   return { fields, body: lines.slice(end + 1).join('\n').trim() }
 }

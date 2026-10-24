@@ -380,6 +380,12 @@ describe('/stream-rules-draft', () => {
 })
 
 describe('lifecycle and review regressions', () => {
+  test('malformed quoted condition is reported rather than broadened', async ($, on) => {
+    world(on, { files: { [`${USER_DIR}/broken.md`]: "---\ncondition: '(?i)you're right'\nscope: [text]\n---\nDo not flatter.\n" } })
+    await start($)
+    expect((await cmd($, 'list')).text).toContain('Files that failed to load:')
+  })
+
   test('inherited-property rule names remain eligible', async ($, on) => {
     const w = world(on, { files: {
       [`${USER_DIR}/banana.md`]: BANANA.replace('banana', 'apple').replace('(?i)banana', '(?i)apple').replace('scope: [text]', 'scope: [text]\ninterrupt: false'),

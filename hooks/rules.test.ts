@@ -109,6 +109,21 @@ describe('quoting', () => {
   })
 })
 
+describe('quote errors', () => {
+  test('an unclosed quote or text after the closing quote is a load error', async () => {
+    const err = (front: string) => {
+      const r = parseFrontmatter(file(front))
+      return 'error' in r ? r.error : 'parsed'
+    }
+    expect(err("condition: '(?i)you're right'")).toContain('after the closing quote')
+    expect(err("condition: 'abc")).toContain('quote is not closed')
+    expect(err('condition: "abc')).toContain('quote is not closed')
+    expect(err("scope: ['tool:Bash' x]")).toContain('after the closing quote')
+    expect(err("condition: 'abc'  # fine")).toBe('parsed')
+    expect(err("condition: 'you''re'")).toBe('parsed')
+  })
+})
+
 describe('globs', () => {
   test('match the path or the file name', async () => {
     expect(globMatches('*.ts', '/x/src/a.ts')).toBe(true)
