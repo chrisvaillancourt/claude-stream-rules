@@ -37,7 +37,7 @@ The body is the message the model is given. Frontmatter fields:
 | --- | --- | --- |
 | `name` | the file name | Identity. Letters, digits, `-`, `_`. |
 | `description` | none | One line, shown in `/stream-rules list` and to the model. |
-| `condition` | none | A regex, or a list of them (any one matches). A leading `(?i)`, `(?m)` or `(?s)` sets the flags. Write regexes in single quotes. |
+| `condition` | none | A regex, or a list of them (any one matches). A leading `(?i)`, `(?m)` or `(?s)` sets the flags. Write regexes in single quotes (`''` for a quote inside). |
 | `scope` | `[text, tool]` | Where to look: `text` (alias `prose`, the reply), `thinking` (the thinking the model streams, when it streams any), `tool` (any tool's input), `tool:Bash` (one tool), `tool:Edit(*.ts)` (one tool on paths matching a glob; `*`, `**`, `?`, `{a,b}`, matched against the path and the file name). |
 | `interrupt` | `true` | `false` turns a stop into a reminder (prose) or a note after the result (tools). |
 | `repeat` | `once` for prose, `always` for tools | `once`: fires once per session; `always`: every match; `after-gap`: again after `gap` model responses in that conversation. |
@@ -49,7 +49,12 @@ What the mod reads of a tool call: `Bash` its `command`; `Edit` its `new_string`
 
 Values are single-line. `[a, b]` and `- item` lists both work. A file that fails to parse is skipped and listed with its error in `/stream-rules list`.
 
-The `examples/` folder has one rule per scope. None is loaded until you copy it into a rules folder.
+The `examples/` folder has one rule per kind. None is loaded until you copy it into a rules folder:
+
+- `no-rm-rf.md`: refuses `rm -rf` in Bash (tool, stops).
+- `ts-no-any.md`: a note after an Edit or Write that adds `any` to a `.ts`/`.tsx` file (tool path glob, reminds, `after-gap`).
+- `no-flattery.md`: stops a reply that opens with "you're absolutely right" (text, stops).
+- `show-test-output.md`: asks the judge whether a reply claims tests pass without showing output (judged).
 
 ## Commands
 
@@ -71,7 +76,7 @@ Drafts a rule from a complaint ("it keeps saying 'you're absolutely right'"). Th
 | Option | Default | What it does |
 | --- | --- | --- |
 | `enabled` | `true` | Turn the mod on for new sessions. `/stream-rules on|off` overrides it per session. |
-| `maxCorrections` | `2` | Corrective turns allowed per prompt you send. Past it, a match on a reply is logged and the reply goes on. |
+| `maxCorrections` | `2` | Corrective turns allowed per prompt you send. Past it, a match on a reply becomes a reminder and the reply goes on. `0` never stops a reply. |
 | `judgeModel` | `haiku` | Model that answers judged rules' questions. |
 | `judgeMaxPerTurn` | `3` | Judged questions asked after one turn, at most. |
 | `judgeAction` | `remind` | `remind` adds the rule as a reminder after a yes; `correct` starts a corrective turn (counts toward `maxCorrections`). |
