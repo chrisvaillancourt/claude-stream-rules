@@ -153,6 +153,34 @@ describe('transition', () => {
     expect(run([{ kind: 'set-mode', mode: 'off' }, { kind: 'tool-match', hits: [tool] }]).kinds).toEqual([])
   })
 
+  test('tool routing: an eligible ordinary refusal wins alone; otherwise routing joins the claim', async () => {
+    const route = spec('matcher: bash-native-read', 'route')
+    const stopOnce = spec("condition: 'x'\nscope: ['tool:Bash']\nrepeat: once", 'stop-once')
+    const soft = spec("condition: 'x'\nscope: ['tool:Bash']\ninterrupt: false", 'soft-bash')
+    const textOf = (a: Action | undefined) => (a !== undefined && (a.kind === 'deny' || a.kind === 'note') ? a.text : '')
+
+    // ordinary refusal: routing is neither claimed nor mentioned
+    const first = run([{ kind: 'tool-match', hits: [stopOnce, route] }])
+    expect(first.kinds).toEqual(['0:deny'])
+    expect(textOf(first.actions[0]![1])).toContain('Message for stop-once.')
+    expect(textOf(first.actions[0]![1])).not.toContain('Message for route.')
+    expect(firedAt(first.s, 'main', 'route')).toBe(undefined)
+
+    // the ordinary rule is spent: routing refuses instead of being suppressed
+    const second = run([{ kind: 'tool-match', hits: [stopOnce, route] }], first.s)
+    expect(second.kinds).toEqual(['0:deny'])
+    expect(textOf(second.actions[0]![1])).toContain('Message for route.')
+    expect(textOf(second.actions[0]![1])).not.toContain('Message for stop-once.')
+
+    // a passive ordinary rule rides along with the routing refusal, both claimed
+    const both = run([{ kind: 'tool-match', hits: [soft, route] }])
+    expect(both.kinds).toEqual(['0:deny'])
+    expect(textOf(both.actions[0]![1])).toContain('Message for soft-bash.')
+    expect(textOf(both.actions[0]![1])).toContain('Message for route.')
+    expect(firedAt(both.s, 'main', 'soft-bash')).toBe(0)
+    expect(firedAt(both.s, 'main', 'route')).toBe(0)
+  })
+
   test('/clear resets everything but the mode, and moves the epoch on', async () => {
     const { s } = run([{ kind: 'set-mode', mode: 'on' }, start, match([STOP]), { kind: 'clear' }])
     expect(s).toEqual({ ...INITIAL, mode: 'on', epoch: 2 })

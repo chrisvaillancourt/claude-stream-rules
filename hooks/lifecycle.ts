@@ -221,7 +221,11 @@ export function transition(s: Session, ev: Event, config: Config): Step {
       if (!isActive(config, s)) return none(s)
       const loop = loopKey(ev.agentId)
       const steps = stepsOf(s, loop)
-      const eligible = ev.hits.filter(r => isEligible(r, 'tool', firedAt(s, loop, r.name), steps))
+      let eligible = ev.hits.filter(r => isEligible(r, 'tool', firedAt(s, loop, r.name), steps))
+      // Tool routing yields to an eligible ordinary refusal: one refusal, the
+      // person's own rule, and routing isn't claimed. Decided after eligibility,
+      // so a spent rule never suppresses routing.
+      if (eligible.some(r => r.matcher === undefined && r.interrupt)) eligible = eligible.filter(r => r.matcher === undefined)
       if (eligible.length === 0) return none(s)
       const c = claim(s, loop, eligible.map(r => r.name))
       // A denial carries every claimed rule, so none is spent unseen.
