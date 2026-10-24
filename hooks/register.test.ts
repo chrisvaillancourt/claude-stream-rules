@@ -12,7 +12,7 @@ const NO_RM = "---\ndescription: No rm -rf\ncondition: 'rm\\s+-rf'\nscope: ['too
 const NOTE_TS = "---\ncondition: ': any\\b'\nscope: ['tool:Edit(*.ts)']\ninterrupt: false\n---\nPrefer unknown.\n"
 const JUDGED = '---\ndescription: Show the test output\nquestion: Does the reply claim tests passed without showing output?\n---\nPaste the test output.\n'
 
-type Opts = { files?: Record<string, string>; abortFails?: boolean; judge?: (prompt: string) => ModelCompleteResult; messages?: SessionMessage[] }
+type Opts = { files?: Record<string, string>; abortFails?: boolean; judge?: (prompt: string) => ModelCompleteResult | Promise<ModelCompleteResult>; messages?: SessionMessage[] }
 
 /** The engine beneath the plugin. `stream` sets the chunks the next model request yields. */
 const world = (on: On, opts: Opts = {}) => {
@@ -75,10 +75,10 @@ const world = (on: On, opts: Opts = {}) => {
     return { result: 'ok', text: 'ok' }
   })
   const completions: string[] = []
-  on('model.complete', ($, e) => {
+  on('model.complete', async ($, e) => {
     completions.push(e.prompt)
     const fn = opts.judge ?? (() => ({ isAnswered: true as const, text: 'no', usage: USAGE }))
-    return { value: fn(e.prompt) }
+    return { value: await fn(e.prompt) }
   })
   on('session.messages', () => ({ value: opts.messages ?? [] }))
 
@@ -376,5 +376,18 @@ describe('/stream-rules-draft', () => {
     await start($)
     expect((await draftCmd($, 'complaint')).text).toContain('a rule needs a condition or a question')
     expect((await draftCmd($, 'save')).text).toContain('No draft is held')
+  })
+})
+
+describe('lifecycle and review regressions', () => {
+  test('inherited-property rule names remain eligible', async ($, on) => {
+    const w = world(on, { files: {
+      [`${USER_DIR}/banana.md`]: BANANA.replace('banana', 'apple').replace('(?i)banana', '(?i)apple').replace('scope: [text]', 'scope: [text]\ninterrupt: false'),
+      [`${USER_DIR}/constructor.md`]: BANANA.replace('scope: [text]', 'scope: [text]\ninterrupt: false'),
+    } })
+    await start($)
+    await turn($, w, 't1', [text('apple')])
+    await turn($, w, 't2', [text('banana')])
+    expect(w.appended().map(x => x.message.content).flat()).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'text', text: expect.stringContaining('Rule "constructor"') })]))
   })
 })

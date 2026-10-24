@@ -8,6 +8,8 @@ import {
   USAGE,
   canCorrect,
   configFrom,
+  firedAt,
+  stepsOf,
   contextText,
   correctionText,
   denyText,
@@ -125,8 +127,8 @@ async function decideProse($: EngineInterface, turnId: string, agentId: string |
   let decision: ProseDecision = { kind: 'none' }
   const pendingId = `p${++counter}`
   await update($, sessionAtom, s => {
-    const steps = s.steps[loop] ?? 0
-    const eligible = hits.filter(r => isEligible(r, 'prose', s.fired[loop]?.[r.name], steps))
+    const steps = stepsOf(s, loop)
+    const eligible = hits.filter(r => isEligible(r, 'prose', firedAt(s, loop, r.name), steps))
     if (eligible.length === 0) {
       decision = { kind: 'none' }
       return s
@@ -165,10 +167,10 @@ async function sendCorrection($: EngineInterface, id: string, gen: number) {
 /** Judged rules, after a main-loop answer: ask each question, then remind (or correct) on a yes. */
 async function judge($: EngineInterface, answer: string, gen: number) {
   const s0 = await read($, sessionAtom)
-  const steps = s0.steps.main ?? 0
+  const steps = stepsOf(s0, 'main')
   const candidates = rules
     .filter(r => r.enabled && r.question !== undefined)
-    .filter(r => isEligible(r, 'prose', s0.fired.main?.[r.name], steps))
+    .filter(r => isEligible(r, 'prose', firedAt(s0, 'main', r.name), steps))
     .filter(r => r.regexes.length === 0 || r.regexes.some(re => re.test(answer)))
     .slice(0, config.judgeMaxPerTurn)
   const broken: Rule[] = []
@@ -192,8 +194,8 @@ async function judge($: EngineInterface, answer: string, gen: number) {
   let claimed: Rule[] = []
   let correct = false
   await update($, sessionAtom, s => {
-    const now = s.steps.main ?? 0
-    claimed = broken.filter(r => isEligible(r, 'prose', s.fired.main?.[r.name], now))
+    const now = stepsOf(s, 'main')
+    claimed = broken.filter(r => isEligible(r, 'prose', firedAt(s, 'main', r.name), now))
     if (claimed.length === 0) return s
     correct = config.judgeAction === 'correct' && canCorrect(config, s)
     const fired = markFired(s, 'main', claimed.map(r => r.name))
@@ -327,8 +329,8 @@ export const register: Register = (on, options) => {
     const loop = loopKey(e.agentId)
     let eligible: Rule[] = []
     await update($, sessionAtom, s => {
-      const steps = s.steps[loop] ?? 0
-      eligible = hits.filter(r => isEligible(r, 'tool', s.fired[loop]?.[r.name], steps))
+      const steps = stepsOf(s, loop)
+      eligible = hits.filter(r => isEligible(r, 'tool', firedAt(s, loop, r.name), steps))
       return eligible.length === 0 ? s : markFired(s, loop, eligible.map(r => r.name))
     })
     if (eligible.length === 0) return next(e)

@@ -90,14 +90,31 @@ export function isEligible(rule: RuleSpec, via: 'prose' | 'tool', firedAt: numbe
   return steps - firedAt >= rule.gap
 }
 
+// Rule names and agent ids are keys of plain objects in $.state: read them as
+// own properties only, so a rule named `constructor` or `toString` is not
+// mistaken for one that already fired. Computed keys define own properties,
+// `__proto__` included.
+const own = <T>(o: Record<string, T>, k: string): T | undefined => (Object.hasOwn(o, k) ? o[k] : undefined)
+
+/** Model responses seen in a loop. */
+export function stepsOf(s: Session, loop: string): number {
+  return own(s.steps, loop) ?? 0
+}
+
+/** The response count at which a rule last fired in a loop; undefined when it never has. */
+export function firedAt(s: Session, loop: string, name: string): number | undefined {
+  const mine = own(s.fired, loop)
+  return mine === undefined ? undefined : own(mine, name)
+}
+
 export function bumpStep(s: Session, loop: string): Session {
-  return { ...s, steps: { ...s.steps, [loop]: (s.steps[loop] ?? 0) + 1 } }
+  return { ...s, steps: { ...s.steps, [loop]: stepsOf(s, loop) + 1 } }
 }
 
 export function markFired(s: Session, loop: string, names: readonly string[]): Session {
-  const at = s.steps[loop] ?? 0
-  const mine = { ...(s.fired[loop] ?? {}) }
-  for (const n of names) mine[n] = at
+  const at = stepsOf(s, loop)
+  let mine: Record<string, number> = { ...(own(s.fired, loop) ?? {}) }
+  for (const n of names) mine = { ...mine, [n]: at }
   return { ...s, fired: { ...s.fired, [loop]: mine } }
 }
 

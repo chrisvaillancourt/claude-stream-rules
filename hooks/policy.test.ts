@@ -5,6 +5,7 @@ import {
   bumpStep,
   canCorrect,
   configFrom,
+  firedAt,
   correctionText,
   denyText,
   extractDraft,
@@ -94,6 +95,16 @@ describe('repeat and caps', () => {
     s = markFired(s, 'main', ['r'])
     expect(s.steps).toEqual({ main: 2, a1: 1 })
     expect(s.fired).toEqual({ main: { r: 2 } })
+  })
+
+  test('names like constructor or __proto__ are plain keys, never inherited ones', async () => {
+    expect(firedAt(INITIAL, 'main', 'constructor')).toBe(undefined)
+    expect(firedAt(INITIAL, 'constructor', 'x')).toBe(undefined)
+    const s = markFired(bumpStep(INITIAL, 'main'), 'main', ['__proto__', 'toString'])
+    expect(firedAt(s, 'main', '__proto__')).toBe(1)
+    expect(firedAt(s, 'main', 'toString')).toBe(1)
+    expect(firedAt(s, 'main', 'constructor')).toBe(undefined)
+    expect(isEligible(spec("condition: 'x'", 'constructor'), 'prose', firedAt(s, 'main', 'constructor'), 1)).toBe(true)
   })
 
   test('canCorrect stops at maxCorrections', async () => {
