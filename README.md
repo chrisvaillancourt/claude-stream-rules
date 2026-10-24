@@ -88,7 +88,7 @@ What is refused is deliberately narrow. A command is routed only when the whole 
 - **Understood:** quotes and escapes (`"cat" "a b.txt"`), comments, `NAME=value` prefixes, `/bin/cat` and `/usr/bin/cat`, and commands joined by `;`, `&&`, `||`, `&` or newlines (`echo ok && cat file` is refused for its `cat`).
 - Main conversation and subagents alike. Your own rules come first: when an ordinary rule of yours refuses the call, its message is the only one given.
 
-**Escape hatch.** When the shell form is really needed, the model runs it again with a Bash `description` that starts with `[tool-routing bypass] ` followed by its reason (at most 240 characters). That skips routing rules only, never your other rules or Claude Code's permissions. The refusal tells the model how. Bypasses are counted in `/stream-rules status`; the command isn't recorded.
+**Escape hatch.** When the shell form is really needed (you asked for that exact command, say), the model runs it again with a Bash `description` that starts with `[tool-routing bypass] ` followed by its reason (at most 240 characters). That skips routing rules only, never your other rules or Claude Code's permissions. The refusal tells the model how. Bypasses are counted in `/stream-rules status`; the command isn't recorded.
 
 **Changing or turning off one rule.** A file of the same name in `~/.claude/stream-rules/` or `<project>/.claude/stream-rules/` replaces the bundled one (project over user over bundled). To switch one off:
 

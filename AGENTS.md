@@ -5,7 +5,7 @@ A Claude Code mod (function-hook plugin). `README.md` is the user-facing spec; k
 ## Layout
 
 - `hooks/rules.ts`: pure rule-file handling. Frontmatter parsing (a small YAML subset), validation, regex compilation (leading `(?i)`/`(?m)`/`(?s)` become JS flags), scope parsing, globs, and matching a text or a tool call against the loaded rules. No `$`, no I/O.
-- `hooks/policy.ts`: pure decisions and text. Options, command parsing, repeat eligibility, the correction cap, the text the model is given, judge prompt and verdict parsing, the draft prompt and draft extraction. No `$`, no I/O.
+- `hooks/policy.ts`: pure decisions and text. Options, command parsing, repeat eligibility, the correction cap, the text the model is given, judge prompt and verdict parsing, the draft prompt and draft extraction, the tool-routing bypass test, routing counts, and the routing status and `test-tool` text. No `$`, no I/O.
 - `hooks/lifecycle.ts`: who owns follow-up work, as one pure state machine: `transition(session, event, config) → { state, actions }`, `classifyIngress`, `isCurrent`, claims and their release. Unit-tested as a table in `lifecycle.test.ts`.
 - `hooks/bash.ts`: the tool-routing matcher. `classifyBash(command)` is a closed, bounded scanner (no `$`, no I/O, no regex over the whole command) that says which native-tool families a Bash command could be replaced by, or why it can't tell. Pinned by the standing corpus in `bash.test.ts`: every false positive reported becomes another row there.
 - `hooks/register.ts`: wiring. Rule loading (`$.fs`), the `turn.step` watcher, the `tool.call` guard, corrective turns, judged rules, both commands, `$.state`. Keep logic thin here; test behavior through the engine in `register.test.ts`.
@@ -47,6 +47,8 @@ A Claude Code mod (function-hook plugin). `README.md` is the user-facing spec; k
 - The mod's own corrective prompt reaches `prompt.submit` with `origin: { kind: 'plugin', name: 'stream-rules' }`, so it doesn't start a new epoch; a `-p` prompt arrives as `{ kind: 'sdk' }` and does.
 - A judged rule's `$.model.complete` runs after the answer in `-p`, but the reminder append is then refused ("this session keeps no conversation to append to"): the run is over. The error is recorded, not silent.
 - `$.session.append({ agentId })` into a running subagent is stored, but a subagent that writes its text and hands back in the same response never reads it.
+- Tool routing: `$.tool.list()` in a `-p` session lists no `Grep` or `Glob` tool (Bash, Read, Edit, Write and the rest are there). With `toolRouting` on, `cat notes.txt` is refused before it runs (`resolved by a hooks module (deny: …tool-routing-read…` in the debug log), and the model then calls `Read`, on the main loop and in a general-purpose subagent alike; `cat notes.txt | wc -l` runs. Told by the person to run the exact command, Haiku reran it with the bypass description instead.
+- A second `--plugin-dir` mod sits beneath this one in `tool.call`: a call this mod refuses never reaches it.
 
 ## Commands
 
