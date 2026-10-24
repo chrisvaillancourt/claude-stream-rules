@@ -2,7 +2,7 @@
 
 A Claude Code mod that enforces your rules while the model works, instead of hoping it remembers a line in CLAUDE.md. Each rule is a small markdown file with a regex (or a yes/no question). When the model's streamed reply or a tool call matches, the mod stops it and gives the model the rule: a tool call is refused before it runs, and a reply is cut off and followed by a corrective turn.
 
-It is a port of oh-my-pi's "time traveling stream rules" to the Claude Code mod API, with one difference: Claude Code can't roll the transcript back, so the text shown before a match stays, and the correction comes as a new turn.
+It is a partial port of oh-my-pi's "time traveling stream rules" to the Claude Code mod API. The biggest difference: Claude Code can't roll the transcript back, so the text shown before a match stays, and the correction comes as a new turn. It also leaves out several oh-my-pi features (structural AST conditions, the bundled language rules and more); [Limitations](#limitations) lists them.
 
 ## Behavior
 
