@@ -308,10 +308,11 @@ describe('judged rules', () => {
 
 describe('/stream-rules', () => {
   test('list shows rules and the files that failed to load', async ($, on) => {
-    world(on, { files: { [`${USER_DIR}/banana.md`]: BANANA, [`${PROJECT_DIR}/broken.md`]: 'no frontmatter' } })
+    world(on, { files: { [`${USER_DIR}/banana.md`]: BANANA, [`${USER_DIR}/judged.md`]: JUDGED, [`${PROJECT_DIR}/broken.md`]: 'no frontmatter' } })
     await start($)
     const t = (await cmd($, 'list')).text ?? ''
     expect(t).toContain('banana (user, stops; text): No bananas')
+    expect(t).toContain('judged (user, judged; the final answer): Show the test output')
     expect(t).toContain(`${PROJECT_DIR}/broken.md: no frontmatter`)
   })
 

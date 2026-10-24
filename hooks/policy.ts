@@ -221,7 +221,7 @@ export function listText(rules: readonly RuleSpec[], errors: readonly LoadError[
   for (const r of rules) {
     const kind = r.question ? 'judged' : r.interrupt ? 'stops' : 'reminds'
     const off = r.enabled ? '' : ' [disabled]'
-    lines.push(`${r.name}${off} (${r.source}, ${kind}; ${scopeText(r)})${r.description ? `: ${r.description}` : ''}`)
+    lines.push(`${r.name}${off} (${r.source}, ${kind}; ${r.question ? 'the final answer' : scopeText(r)})${r.description ? `: ${r.description}` : ''}`)
     if (r.conditions.length > 0) lines.push(`  condition: ${r.conditions.join(' | ')}`)
     if (r.question) lines.push(`  question: ${r.question}`)
   }

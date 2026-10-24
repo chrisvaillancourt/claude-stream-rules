@@ -182,7 +182,7 @@ async function judge($: EngineInterface, answer: string, gen: number) {
         continue
       }
       const v = parseVerdict(res.text)
-      if (v === undefined) log($, `judging ${r.name}: unclear verdict; nothing delivered`)
+      log($, v === undefined ? `judging ${r.name}: unclear verdict; nothing delivered` : `judged ${r.name}: ${v}`)
       if (v === 'yes') broken.push(r)
     } catch (err) {
       log($, `judging ${r.name} failed: ${errText(err)}`)
