@@ -26,6 +26,13 @@ A Claude Code mod (function-hook plugin). `README.md` is the user-facing spec; k
 - **Drafts never write themselves.** `/stream-rules-draft <complaint>` asks the draft model for a rule, validates it with the live parser, counts matches in recent assistant messages, and holds it in `$.state`. Only `/stream-rules-draft save [project|user]` writes it, refusing to overwrite an existing file unless `overwrite` is given.
 - **Injected text** speaks of the reply and the work, never of the model's thinking or reasoning, even for a rule scoped to `thinking`.
 
+## Checked live (Claude Code 2.1.310, `claude -p`, Haiku)
+
+- `$.turn.abort({ turnId })` called (not awaited) from inside this turn's `turn.step` hook resolves; the stream beneath ends, `turn.complete` comes with `reason: 'aborted'`, and its `answer` is only what was yielded before the match. A `$.prompt.submit` from a `$.clock.after(0)` timer after that starts the corrective turn, headless too.
+- A `tool.call` deny stops a Bash call before it runs; the model reports the refusal.
+- A judged rule's `$.model.complete` runs after the answer in `-p`, but the reminder append is then refused ("this session keeps no conversation to append to"): the run is over. The error is recorded, not silent.
+- `$.session.append({ agentId })` into a running subagent is stored, but a subagent that writes its text and hands back in the same response never reads it.
+
 ## Commands
 
 ```sh

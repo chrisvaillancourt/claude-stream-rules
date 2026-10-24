@@ -95,6 +95,7 @@ Drafts a rule from a complaint ("it keeps saying 'you're absolutely right'"). Th
 - **Subagents can't be interrupted.** A reply match in a subagent becomes a reminder it reads on its next request; if the subagent is on its last response, the reminder lands too late. Tool rules do stop subagent tool calls.
 - **Regex rules miss paraphrases.** Use a judged rule for fuzzy cases, and check new regexes against real output (the draft command does a first pass).
 - **Not a security boundary.** A command that writes files from the shell isn't seen as an edit, tools the API runs itself can't be intercepted, and the tool guard fails open if the mod itself errors (the error is shown in `/stream-rules status`).
+- **Headless runs** (`claude -p`): the run ends with the final answer, so a judged rule's reminder after it is refused (and logged). Corrective turns and tool refusals work headless.
 - **Judged verdicts are yes/no from one call**, not a calibrated probability, and see only the final answer, not what the tools did.
 - **A hot reload drops a pending correction** (the timer that would send it is gone). The mod logs that it dropped it.
 - Cut from the oh-my-pi feature for this version: AST (structural) conditions, the 26 bundled language rules, a global `globs` filter, `contextMode: discard`, per-rule interrupt modes beyond `interrupt: true|false`, and an interactive preview for drafts.
