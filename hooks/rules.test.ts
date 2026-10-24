@@ -5,7 +5,10 @@ import {
   compileCondition,
   globMatches,
   matchText,
+  MATCHERS,
   matchTool,
+  matchToolCall,
+  targetOf,
   mergeRules,
   parseFrontmatter,
   parseRule,
@@ -14,7 +17,7 @@ import {
 
 const file = (front: string, body = 'Do the right thing.') => `---\n${front}\n---\n${body}\n`
 
-const rule = (front: string, name = 'r.md', source: 'user' | 'project' = 'user') => {
+const rule = (front: string, name = 'r.md', source: 'bundled' | 'user' | 'project' = 'user') => {
   const r = parseRule(file(front), name, source, `/rules/${name}`)
   if ('error' in r) throw new Error(r.error)
   return r.rule
@@ -190,5 +193,78 @@ describe('mergeRules', () => {
       rule("condition: 'p'\nenabled: false", 'gone.md', 'project'),
     ])
     expect(merged.map(r => `${r.name}:${r.source}:${r.enabled}`)).toEqual(['gone:project:false', 'mine:user:true', 'same:project:true'])
+  })
+})
+
+describe('routing rules (matcher)', () => {
+  const bad = (front: string) => {
+    const r = parseRule(file(front), 'b.md', 'user', '/rules/b.md')
+    return 'error' in r ? r.error : 'parsed'
+  }
+
+  test('a matcher makes a routing rule scoped to Bash, with no condition', async () => {
+    const r = rule('matcher: bash-native-read', 'tool-routing-read.md')
+    expect(r.matcher).toBe('bash-native-read')
+    expect(r.conditions).toEqual([])
+    expect(r.scope).toEqual([{ kind: 'tool', tool: 'Bash' }])
+    expect(rule("matcher: bash-native-edit\nscope: ['tool:Bash']").scope).toEqual([{ kind: 'tool', tool: 'Bash' }])
+  })
+
+  test('a malformed matcher field is a load error, never silently dropped', async () => {
+    // Before 0.2.0 an unknown `matcher` beside a valid condition was ignored, so
+    // the rule loaded as a plain regex rule.
+    expect(bad("matcher: bash-native-read\ncondition: 'cat'")).toBe('a rule with a matcher takes no condition or question')
+    expect(bad('matcher: bash-native-read\nquestion: Is it?')).toBe('a rule with a matcher takes no condition or question')
+    expect(bad('matcher: bash-native-cat')).toBe('matcher must be bash-native-read, bash-native-edit, bash-native-search or bash-native-files')
+    expect(bad("matcher: bash-native-cat\ncondition: 'cat'")).toBe('matcher must be bash-native-read, bash-native-edit, bash-native-search or bash-native-files')
+    expect(bad('matcher: [bash-native-read, bash-native-edit]')).toBe('matcher must be bash-native-read, bash-native-edit, bash-native-search or bash-native-files')
+    expect(bad("matcher: bash-native-read\nscope: [text]")).toBe('a rule with a matcher can only have the tool:Bash scope')
+    expect(bad("matcher: bash-native-read\nscope: ['tool:Bash', text]")).toBe('a rule with a matcher can only have the tool:Bash scope')
+    expect(bad("matcher: bash-native-read\nscope: ['tool:Bash(*.md)']")).toBe('a rule with a matcher can only have the tool:Bash scope')
+  })
+
+  test('a routing rule matches a Bash call by family, and reports what the matcher made of it', async () => {
+    const rules = compile([
+      rule('matcher: bash-native-read', 'read.md'),
+      rule('matcher: bash-native-edit', 'edit.md'),
+      rule("condition: 'rm -rf'\nscope: ['tool:Bash']", 'rm.md'),
+    ])
+    const call = (command: string) => matchToolCall(rules, 'Bash', { command })
+    expect(call('cat a.md').hits.map(r => r.name)).toEqual(['read'])
+    expect(call('cat a.md').analysis).toEqual({ kind: 'supported', families: ['read'] })
+    expect(call("cat a.md; sed -i '' s/x/y/ b && rm -rf c").hits.map(r => r.name)).toEqual(['read', 'edit', 'rm'])
+    expect(call('cat a.md | wc -l').hits).toEqual([])
+    expect(call('cat "$(p)"').analysis?.kind).toBe('unsupported')
+    expect(call('rm -rf "$(p)"').hits.map(r => r.name)).toEqual(['rm'])
+    expect(matchToolCall(rules, 'Read', { file_path: '/a' }).analysis).toBeUndefined()
+    // no routing rule loaded: the matcher isn't run
+    expect(matchToolCall(compile([rule("condition: 'x'\nscope: ['tool:Bash']")]), 'Bash', { command: 'cat a' }).analysis).toBeUndefined()
+    expect(matchTool(rules, 'Bash', { command: 'cat a.md' }).map(r => r.name)).toEqual(['read'])
+  })
+
+  test('a disabled routing rule matches nothing and skips the matcher', async () => {
+    const rules = compile([rule('matcher: bash-native-read\nenabled: false', 'read.md')])
+    expect(matchToolCall(rules, 'Bash', { command: 'cat a.md' })).toEqual({ hits: [] })
+  })
+
+  test('targets and families of each matcher', async () => {
+    expect(MATCHERS.map(m => `${m}:${targetOf(m)}`)).toEqual(['bash-native-read:Read', 'bash-native-edit:Edit', 'bash-native-search:Grep', 'bash-native-files:Glob'])
+  })
+
+  test('precedence is bundled < user < project, by name', async () => {
+    const merged = mergeRules([
+      rule('matcher: bash-native-read', 'tool-routing-read.md', 'bundled'),
+      rule('matcher: bash-native-edit', 'tool-routing-edit.md', 'bundled'),
+      rule('matcher: bash-native-files', 'tool-routing-files.md', 'bundled'),
+      rule('matcher: bash-native-read\nenabled: false', 'tool-routing-read.md', 'user'),
+      rule("condition: 'sed'\nscope: ['tool:Bash']", 'tool-routing-edit.md', 'project'),
+      rule('matcher: bash-native-files\nenabled: false', 'tool-routing-files.md', 'project'),
+      rule('matcher: bash-native-files', 'tool-routing-files.md', 'user'),
+    ])
+    expect(merged.map(r => `${r.name}:${r.source}:${r.enabled}:${r.matcher ?? '-'}`)).toEqual([
+      'tool-routing-edit:project:true:-',
+      'tool-routing-files:project:false:bash-native-files',
+      'tool-routing-read:user:false:bash-native-read',
+    ])
   })
 })

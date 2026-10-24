@@ -1,5 +1,7 @@
 // Rule files: parsing, validation, compiling and matching. Pure: no `$`, no I/O.
-import type { Repeat, RuleSource, RuleSpec, Scope } from '../types'
+import type { Matcher, Repeat, RuleSource, RuleSpec, Scope } from '../types'
+import { classifyBash } from './bash'
+import type { Classification, Family } from './bash'
 
 export type Field = string | number | boolean | string[]
 export type Rule = RuleSpec & { regexes: RegExp[] }
@@ -177,6 +179,13 @@ export function parseRule(text: string, fileName: string, source: RuleSource, pa
   const name = typeof f.name === 'string' && f.name !== '' ? f.name : fileName.replace(/\.md$/i, '')
   if (!/^[A-Za-z0-9_-]+$/.test(name)) return { error: 'name must be letters, digits, - and _' }
 
+  let matcher: Matcher | undefined
+  if (f.matcher !== undefined) {
+    const m = MATCHERS.find(x => x === f.matcher)
+    if (m === undefined) return { error: `matcher must be ${MATCHERS.slice(0, -1).join(', ')} or ${MATCHERS.at(-1)}` }
+    matcher = m
+  }
+
   const conditions = list(f.condition) ?? []
   for (const [i, c] of conditions.entries()) {
     const re = compileCondition(c)
@@ -184,13 +193,17 @@ export function parseRule(text: string, fileName: string, source: RuleSource, pa
   }
   const question = typeof f.question === 'string' && f.question.trim() !== '' ? f.question.trim() : undefined
   if (f.question !== undefined && question === undefined) return { error: 'question must be a line of text' }
-  if (conditions.length === 0 && question === undefined) return { error: 'a rule needs a condition or a question' }
+  if (matcher !== undefined && (conditions.length > 0 || f.question !== undefined)) return { error: 'a rule with a matcher takes no condition or question' }
+  if (matcher === undefined && conditions.length === 0 && question === undefined) return { error: 'a rule needs a condition or a question' }
 
   const scope: Scope[] = []
-  for (const word of list(f.scope) ?? ['text', 'tool']) {
+  for (const word of list(f.scope) ?? (matcher !== undefined ? ['tool:Bash'] : ['text', 'tool'])) {
     const s = parseScope(word)
     if (!s) return { error: `unknown scope: ${word}` }
     scope.push(s)
+  }
+  if (matcher !== undefined && !(scope.length === 1 && scope[0]!.kind === 'tool' && scope[0]!.tool?.toLowerCase() === 'bash' && scope[0]!.glob === undefined)) {
+    return { error: 'a rule with a matcher can only have the tool:Bash scope' }
   }
 
   const bool = (key: string, fallback: boolean): boolean | { error: string } => {
@@ -223,6 +236,7 @@ export function parseRule(text: string, fileName: string, source: RuleSource, pa
       repeat,
       gap,
       ...(question !== undefined ? { question } : {}),
+      ...(matcher !== undefined ? { matcher } : {}),
       enabled,
       body: fm.body,
       source,
@@ -313,33 +327,58 @@ export function compile(specs: readonly RuleSpec[]): Rule[] {
 
 const live = (r: Rule) => r.enabled && r.question === undefined
 
+/** The routing matchers, in the order status and messages list them. */
+export const MATCHERS: readonly Matcher[] = ['bash-native-read', 'bash-native-edit', 'bash-native-search', 'bash-native-files']
+
+const FAMILY: Record<Matcher, Family> = { 'bash-native-read': 'read', 'bash-native-edit': 'edit', 'bash-native-search': 'search', 'bash-native-files': 'files' }
+const TARGET: Record<Matcher, string> = { 'bash-native-read': 'Read', 'bash-native-edit': 'Edit', 'bash-native-search': 'Grep', 'bash-native-files': 'Glob' }
+
+/** The native tool a routing matcher points to. */
+export const targetOf = (m: Matcher): string => TARGET[m]
+
+/** A rule with a matcher: tool routing, which the bypass skips and ordinary rules outrank. */
+export const isRouting = (r: RuleSpec): boolean => r.matcher !== undefined
+
 /** Stream rules (not judged) scoped to `kind` whose condition matches the text. */
 export function matchText(rules: readonly Rule[], kind: 'text' | 'thinking', text: string): Rule[] {
   return rules.filter(r => live(r) && r.scope.some(s => s.kind === kind) && r.regexes.some(re => re.test(text)))
 }
 
-/** Stream rules whose tool scope covers this call and whose condition matches what it adds. */
-export function matchTool(rules: readonly Rule[], tool: string, input: unknown): Rule[] {
+/**
+ * Stream rules whose tool scope covers this call and whose condition matches
+ * what it adds; routing rules whose family the Bash matcher found. `analysis`
+ * is what the matcher made of the command, present only when it ran (a Bash
+ * call with an enabled routing rule loaded).
+ */
+export function matchToolCall(rules: readonly Rule[], tool: string, input: unknown): { hits: Rule[]; analysis?: Classification } {
   const { text, path } = projectTool(tool, input)
-  return rules.filter(
-    r =>
-      live(r) &&
-      r.scope.some(
-        s =>
-          s.kind === 'tool' &&
-          (s.tool === undefined || s.tool.toLowerCase() === tool.toLowerCase()) &&
-          (s.glob === undefined || (path !== undefined && globMatches(s.glob, path))),
-      ) &&
-      r.regexes.some(re => re.test(text)),
-  )
+  const covers = (r: Rule) =>
+    r.scope.some(
+      s =>
+        s.kind === 'tool' &&
+        (s.tool === undefined || s.tool.toLowerCase() === tool.toLowerCase()) &&
+        (s.glob === undefined || (path !== undefined && globMatches(s.glob, path))),
+    )
+  const routing = rules.filter(r => live(r) && r.matcher !== undefined && covers(r))
+  const analysis = routing.length > 0 ? classifyBash(text) : undefined
+  const found = analysis?.kind === 'supported' ? analysis.families : []
+  const hits = rules.filter(r => live(r) && covers(r) && (r.matcher !== undefined ? found.includes(FAMILY[r.matcher]) : r.regexes.some(re => re.test(text))))
+  return analysis === undefined ? { hits } : { hits, analysis }
 }
 
-/** One rule per name, sorted: a project rule beats a user one, and the first file of a source wins. */
+/** The rules a tool call matches (see matchToolCall). */
+export function matchTool(rules: readonly Rule[], tool: string, input: unknown): Rule[] {
+  return matchToolCall(rules, tool, input).hits
+}
+
+const RANK: Record<RuleSource, number> = { bundled: 0, user: 1, project: 2 }
+
+/** One rule per name, sorted: project beats user beats bundled, and the first file of a source wins. */
 export function mergeRules(specs: readonly RuleSpec[]): RuleSpec[] {
   const byName = new Map<string, RuleSpec>()
   for (const s of specs) {
     const held = byName.get(s.name)
-    if (!held || (held.source === 'user' && s.source === 'project')) byName.set(s.name, s)
+    if (!held || RANK[s.source] > RANK[held.source]) byName.set(s.name, s)
   }
   return [...byName.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 }

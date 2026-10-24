@@ -5,8 +5,11 @@ export type Scope = { kind: 'text' } | { kind: 'thinking' } | { kind: 'tool'; to
 
 export type Repeat = 'once' | 'always' | 'after-gap'
 
-/** Which folder a rule came from. */
-export type RuleSource = 'user' | 'project'
+/** Where a rule came from: the mod's bundled ruleset, your folder, or the project's. Later wins by name. */
+export type RuleSource = 'bundled' | 'user' | 'project'
+
+/** A routing rule's structural Bash matcher (hooks/bash.ts), one per native-tool family. */
+export type Matcher = 'bash-native-read' | 'bash-native-edit' | 'bash-native-search' | 'bash-native-files'
 
 /** A rule file, parsed and validated. Plain data: the compiled regexes are made from `conditions`. */
 export type RuleSpec = {
@@ -21,6 +24,8 @@ export type RuleSpec = {
   gap: number
   /** A judged rule's yes/no question; yes means the rule was broken. */
   question?: string
+  /** A routing rule's matcher. Such a rule has no conditions or question and only the tool:Bash scope. */
+  matcher?: Matcher
   enabled: boolean
   /** The message the model is given. */
   body: string
