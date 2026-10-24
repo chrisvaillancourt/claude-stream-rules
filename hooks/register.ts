@@ -298,12 +298,16 @@ async function countRouting($: EngineInterface, kind: 'unsupported' | 'limit' | 
  */
 async function actingHits($: EngineInterface, hits: Rule[], input: unknown): Promise<Rule[]> {
   if (!hits.some(isRouting)) return hits
-  const ordinary = hits.filter(r => !isRouting(r))
-  if (isBypass(input)) {
+  // The bypass skips bundled routing only: a matcher rule the person or the
+  // project wrote stays enforced.
+  const bundled = (r: Rule) => isRouting(r) && r.source === 'bundled'
+  if (isBypass(input) && hits.some(bundled)) {
     await countRouting($, 'bypassed')
     log($, 'a Bash call used the tool-routing bypass')
-    return ordinary
+    hits = hits.filter(r => !bundled(r))
+    if (!hits.some(isRouting)) return hits
   }
+  const ordinary = hits.filter(r => !isRouting(r))
   const tools = await toolNames($)
   if (tools === null) {
     await recordError($, 'could not list the tools; tool routing let the call run')

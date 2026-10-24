@@ -882,3 +882,16 @@ describe('tool routing', () => {
     expect((await cmd($, 'test-tool Bash')).text).toContain('test-tool needs a command')
   })
 })
+
+describe('tool routing review round 1', () => {
+  const bash = ($: any, command: string, extra: Record<string, unknown> = {}) => $.tool.call({ tool: 'Bash', command, ...extra })
+  const REQUIRE_READ = '---\nname: require-read\nmatcher: bash-native-read\n---\nThis project wants Read.\n'
+
+  test('the bypass skips bundled routing only: a project matcher rule still refuses, option off', async ($, on) => {
+    const w = world(on, { files: { [`${PROJECT_DIR}/require-read.md`]: REQUIRE_READ } })
+    await start($)
+    expect((await bash($, 'cat notes.txt')).deny).toContain('This project wants Read.')
+    expect((await bash($, 'cat notes.txt', { description: '[tool-routing bypass] exact shell requested' })).deny).toContain('This project wants Read.')
+    expect(w.ran).toEqual([])
+  })
+})

@@ -88,7 +88,7 @@ What is refused is deliberately narrow. A command is routed only when the whole 
 - **Understood:** quotes and escapes (`"cat" "a b.txt"`), comments, `NAME=value` prefixes, `/bin/cat` and `/usr/bin/cat`, and commands joined by `;`, `&&`, `||`, `&` or newlines (`echo ok && cat file` is refused for its `cat`).
 - Main conversation and subagents alike. Your own rules come first: when an ordinary rule of yours refuses the call, its message is the only one given.
 
-**Escape hatch.** When the shell form is really needed (you asked for that exact command, say), the model runs it again with a Bash `description` that starts with `[tool-routing bypass] ` followed by its reason (at most 240 characters). That skips routing rules only, never your other rules or Claude Code's permissions. The refusal tells the model how. Bypasses are counted in `/stream-rules status`; the command isn't recorded.
+**Escape hatch.** When the shell form is really needed (you asked for that exact command, say), the model runs it again with a Bash `description` that starts with `[tool-routing bypass] ` followed by its reason (at most 240 characters). That skips the bundled routing rules only, never a routing rule you or the project wrote (even one that replaces a bundled rule by name), your other rules, or Claude Code's permissions. The refusal tells the model how. Bypasses are counted in `/stream-rules status`; the command isn't recorded.
 
 **Changing or turning off one rule.** A file of the same name in `~/.claude/stream-rules/` or `<project>/.claude/stream-rules/` replaces the bundled one (project over user over bundled). To switch one off:
 
@@ -103,7 +103,7 @@ Off.
 
 **Contract.** In scope: literal, flat shell commands; quotes and escapes; comments; `NAME=value` prefixes; sequencing with `;`, `&&`, `||`, `&` and newlines; recognizing pipelines; and the option forms listed above. Out of contract: nested execution (`$(…)`, `bash -c`, `eval`), control flow, shell wrappers and interpreters (`sudo`, `env`, `xargs`, `nice`), aliases and functions, any expansion, Windows shells, scripts, checking the filesystem (FIFOs, symlinks, binary files), and stopping a model that sets out to evade it. Out-of-contract input is left to run and is never reported as analyzed. The standing corpus in `hooks/bash.test.ts` pins every case; a false positive you report becomes a new row.
 
-You can also write your own routing rules: `matcher` takes one of the four values above, with your own message as the body. A routing rule has no `condition` or `question`, and its scope can only be `tool:Bash` (the default for it). Any other combination, or an unknown `matcher`, is a load error listed in `/stream-rules list`.
+You can also write your own routing rules: `matcher` takes one of the four values above, with your own message as the body. They act whether or not `toolRouting` is on, and the bypass doesn't skip them. A routing rule has no `condition` or `question`, and its scope can only be `tool:Bash` (the default for it). Any other combination, or an unknown `matcher`, is a load error listed in `/stream-rules list`.
 
 ## Commands
 
