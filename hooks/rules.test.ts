@@ -119,6 +119,11 @@ describe('quote errors', () => {
     expect(err("condition: 'abc")).toContain('quote is not closed')
     expect(err('condition: "abc')).toContain('quote is not closed')
     expect(err("scope: ['tool:Bash' x]")).toContain('after the closing quote')
+    // the list ends at the first ] outside quotes; a comment may hold brackets, a quoted item may too
+    const listed = parseFrontmatter(file("condition: ['foo', 'a]b'] # [case-sensitive]"))
+    expect('error' in listed ? listed.error : listed.fields.condition).toEqual(['foo', 'a]b'])
+    expect(err("condition: ['foo'] trailing")).toContain('after the closing ]')
+    expect(err("condition: ['foo'")).toContain('not closed with ]')
     expect(err("condition: 'abc'  # fine")).toBe('parsed')
     expect(err("condition: 'you''re'")).toBe('parsed')
   })

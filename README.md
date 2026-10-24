@@ -56,7 +56,7 @@ The body is the message the model is given. Frontmatter fields:
 
 What the mod reads of a tool call: `Bash` its `command`; `Edit` its `new_string` (never `old_string`, so deleting a pattern doesn't trip a rule against adding it); `Write` its `content`; `NotebookEdit` its `new_source`; any other tool its input as JSON. Path globs read `file_path`, `notebook_path` or `path`.
 
-Values are single-line. `[a, b]` and `- item` lists both work. A file that fails to parse is skipped and listed with its error in `/stream-rules list`.
+Values are single-line. `[a, b]` and `- item` lists both work, and a ` # comment` may follow a value. An unclosed quote, or text after a closing quote or `]`, is a load error rather than a guess. A file that fails to parse is skipped and listed with its error in `/stream-rules list`.
 
 The `examples/` folder has one rule per kind. None is loaded until you copy it into a rules folder:
 

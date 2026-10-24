@@ -49,6 +49,19 @@ function findQuoteEnd(s: string, q: string): number {
   return -1
 }
 
+/** Index of the `]` that closes a list starting at 0: the first one outside quotes; -1 when none. */
+function listEnd(s: string): number {
+  for (let i = 1; i < s.length; i++) {
+    const c = s[i]
+    if (c === "'" || c === '"') {
+      const end = findQuoteEnd(s.slice(i), c)
+      if (end < 0) return -1
+      i += end
+    } else if (c === ']') return i
+  }
+  return -1
+}
+
 /** Splits `a, 'b, c', d` on the commas outside quotes. */
 function splitList(inner: string): string[] {
   const items: string[] = []
@@ -84,7 +97,7 @@ function splitList(inner: string): string[] {
 function value(raw: string): Field {
   const s = raw.trim()
   if (s.startsWith('[')) {
-    const close = s.lastIndexOf(']')
+    const close = listEnd(s)
     if (close < 0) throw new ValueError(`the list is not closed with ]: ${s}`)
     checkTail(s.slice(close + 1), ']')
     return splitList(s.slice(1, close))
