@@ -9,6 +9,37 @@
       "title": "Enabled",
       "description": "Turn the mod on for new sessions. /stream-rules on|off overrides it for a session.",
       "default": true
+    },
+    "maxCorrections": {
+      "type": "number",
+      "title": "Corrections per prompt",
+      "description": "Corrective turns allowed per prompt you send. Past it, a match on a reply becomes a reminder and the reply goes on.",
+      "default": 2
+    },
+    "judgeModel": {
+      "type": "string",
+      "title": "Judge model",
+      "description": "Model that answers judged rules' yes/no questions.",
+      "default": "haiku"
+    },
+    "judgeMaxPerTurn": {
+      "type": "number",
+      "title": "Judged questions per turn",
+      "description": "Judged questions asked after one turn, at most.",
+      "default": 3
+    },
+    "judgeAction": {
+      "type": "string",
+      "title": "After a judged yes",
+      "description": "remind adds the rule as a reminder; correct starts a corrective turn (counts toward the corrections cap).",
+      "options": ["remind", "correct"],
+      "default": "remind"
+    },
+    "draftModel": {
+      "type": "string",
+      "title": "Draft model",
+      "description": "Model that drafts rules for /stream-rules-draft.",
+      "default": "haiku"
     }
   },
   "author": {
