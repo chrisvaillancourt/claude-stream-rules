@@ -1,0 +1,13 @@
+{
+  "name": "stream-rules",
+  "owner": {
+    "name": "Chris Vaillancourt"
+  },
+  "plugins": [
+    {
+      "name": "stream-rules",
+      "source": "./"
+    }
+  ],
+  "description": "Watches the model's output and tool calls against your rules as they stream, and stops and corrects the model when one matches."
+}
