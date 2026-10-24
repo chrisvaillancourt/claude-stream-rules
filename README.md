@@ -28,6 +28,7 @@ Rules are read when a session starts (and on `/stream-rules reload`) from:
 
 - `~/.claude/stream-rules/*.md`: yours, for every project.
 - `<project>/.claude/stream-rules/*.md`: the project's. A project rule with the same name replaces your own.
+- With the `toolRouting` option on, the mod's own `rulesets/tool-routing/*.md` too, below both: a rule of yours with the same name replaces a bundled one.
 
 They are deliberately not in `.claude/rules/`, which Claude Code loads into the prompt itself.
 
@@ -52,7 +53,8 @@ The body is the message the model is given. Frontmatter fields:
 | `repeat` | `once` for prose, `always` for tools | `once`: fires once per session; `always`: every match; `after-gap`: again after `gap` model responses in that conversation. |
 | `gap` | `10` | Model responses between firings for `after-gap`. |
 | `question` | none | Makes the rule judged: a yes/no question about the final answer (yes means the rule was broken). `condition`, if given, must match the answer first. |
-| `enabled` | `true` | `false` turns the rule off, and hides a user rule of the same name. |
+| `matcher` | none | Makes the rule a tool-routing rule: `bash-native-read`, `bash-native-edit`, `bash-native-search` or `bash-native-files` ([Tool routing](#tool-routing-opt-in)). Not with `condition` or `question`. |
+| `enabled` | `true` | `false` turns the rule off, and hides a user (or bundled) rule of the same name. |
 
 What the mod reads of a tool call: `Bash` its `command`; `Edit` its `new_string` (never `old_string`, so deleting a pattern doesn't trip a rule against adding it); `Write` its `content`; `NotebookEdit` its `new_source`; any other tool its input as JSON. Path globs read `file_path`, `notebook_path` or `path`.
 
@@ -65,13 +67,52 @@ The `examples/` folder has one rule per kind. None is loaded until you copy it i
 - `no-flattery.md`: stops a reply that opens with "you're absolutely right" (text, stops).
 - `show-test-output.md`: asks the judge whether a reply claims tests pass without showing output (judged).
 
+## Tool routing (opt-in)
+
+Models often read and edit files through Bash (`cat file`, `sed -i`) when Claude Code has a tool built for it. Turn on the `toolRouting` option and the mod refuses those Bash calls before they run and names the tool to use instead:
+
+| Rule (bundled) | `matcher` | Refuses | Points to |
+| --- | --- | --- | --- |
+| `tool-routing-read` | `bash-native-read` | `cat file`, `less file`, `more file`, `head -n 40 file`, `tail -n 40 file` | `Read({file_path: "/abs/path", offset: 1, limit: 80})` |
+| `tool-routing-edit` | `bash-native-edit` | `sed -i …`, `perl -pi -e … file`, `awk -i inplace … file` | `Read`, then `Edit({file_path, old_string, new_string})` |
+| `tool-routing-search` | `bash-native-search` | `grep pattern file`, `rg pattern [path]` | the Grep tool, **only when the session has one** |
+| `tool-routing-files` | `bash-native-files` | `find path -name '*.ts' [-type f]`, `fd -g '*.ts' [-t f]`, `ls -R` | the Glob tool, **only when the session has one** |
+
+Claude Code 2.1.310 has no Grep or Glob tool: search and file finding go through Bash. So on that release only the read and edit rules act, and `/stream-rules status` says "Grep tool not available on this Claude Code; search routing off" (and the same for Glob). The mod never tells the model to call a tool the session doesn't have.
+
+What is refused is deliberately narrow. A command is routed only when the whole of one command in it is a plain, recognized form, and anything the matcher doesn't fully understand runs untouched:
+
+- **Pipelines run.** `cat file | wc -l`, `git log | grep foo`, `find . -name '*.ts' -print0 | xargs -0 wc -l`: every stage of a pipeline is left alone, because a native tool's output is not a byte stream.
+- **Other semantics run.** Concatenation (`cat a b`), copies and writes (`cat file > copy`, `cat > file`), heredocs, following (`tail -f`), bytes (`head -c 16`), stdin and devices (`cat -`, `cat /dev/urandom`), quiet and count modes (`grep -q`, `grep -c`, `rg --count`), `--help`, a plain `sed` that prints, `ls -lR`, `find -type d`, `find -exec`, and any option the matcher doesn't know.
+- **Unsupported shell runs, whole.** `$VAR` and other expansions, `$(…)`, backticks, heredocs, `( … )` and `{ … }` groups, `if`/`for`/`while` and other control flow, process substitution and unclosed quotes make routing skip the entire command (it counts them in `/stream-rules status`). It never guesses with a regex.
+- **Understood:** quotes and escapes (`"cat" "a b.txt"`), comments, `NAME=value` prefixes, `/bin/cat` and `/usr/bin/cat`, and commands joined by `;`, `&&`, `||`, `&` or newlines (`echo ok && cat file` is refused for its `cat`).
+- Main conversation and subagents alike. Your own rules come first: when an ordinary rule of yours refuses the call, its message is the only one given.
+
+**Escape hatch.** When the shell form is really needed, the model runs it again with a Bash `description` that starts with `[tool-routing bypass] ` followed by its reason (at most 240 characters). That skips routing rules only, never your other rules or Claude Code's permissions. The refusal tells the model how. Bypasses are counted in `/stream-rules status`; the command isn't recorded.
+
+**Changing or turning off one rule.** A file of the same name in `~/.claude/stream-rules/` or `<project>/.claude/stream-rules/` replaces the bundled one (project over user over bundled). To switch one off:
+
+```markdown
+---
+name: tool-routing-read
+matcher: bash-native-read
+enabled: false
+---
+Off.
+```
+
+**Contract.** In scope: literal, flat shell commands; quotes and escapes; comments; `NAME=value` prefixes; sequencing with `;`, `&&`, `||`, `&` and newlines; recognizing pipelines; and the option forms listed above. Out of contract: nested execution (`$(…)`, `bash -c`, `eval`), control flow, shell wrappers and interpreters (`sudo`, `env`, `xargs`, `nice`), aliases and functions, any expansion, Windows shells, scripts, checking the filesystem (FIFOs, symlinks, binary files), and stopping a model that sets out to evade it. Out-of-contract input is left to run and is never reported as analyzed. The standing corpus in `hooks/bash.test.ts` pins every case; a false positive you report becomes a new row.
+
+You can also write your own routing rules: `matcher` takes one of the four values above, with your own message as the body. A routing rule has no `condition` or `question`, and its scope can only be `tool:Bash` (the default for it). Any other combination, or an unknown `matcher`, is a load error listed in `/stream-rules list`.
+
 ## Commands
 
-`/stream-rules [status|list|test <text>|on|off|reload|reset]`
+`/stream-rules [status|list|test <text>|test-tool Bash <command>|on|off|reload|reset]`
 
-- `status` (the default): on or off and why, how many rules loaded, corrections used, the last error.
-- `list`: every rule with its scope, conditions and source, then files that failed to load and why.
+- `status` (the default): on or off and why, how many rules loaded, corrections used, the last error; and tool routing's state: whether the option is on, which routing rules are active, which are off for want of their target tool, and how many Bash calls were unsupported, over the size limit or bypassed.
+- `list`: every rule with its scope, conditions (or `matcher`) and source (`bundled`, `user`, `project`), then files that failed to load and why.
 - `test <text>`: which rules match the text as a reply. Judged rules show whether their prefilter matched; the question isn't asked.
+- `test-tool Bash <command>`: what the matcher makes of a Bash command and which rules would match it as a tool call: refused by which rule, or run. It ignores repeat state and the bypass.
 - `on` / `off`: turn the mod on or off for this session.
 - `reload`: read the rule folders again.
 - `reset`: forget which rules have fired this session, so `once` rules can fire again.
@@ -90,10 +131,12 @@ Drafts a rule from a complaint ("it keeps saying 'you're absolutely right'"). Th
 | `judgeMaxPerTurn` | `3` | Judged questions asked after one turn, at most. |
 | `judgeAction` | `remind` | `remind` adds the rule as a reminder after a yes; `correct` starts a corrective turn (counts toward `maxCorrections`). |
 | `draftModel` | `haiku` | Model that drafts rules for `/stream-rules-draft`. |
+| `toolRouting` | `false` | Load the bundled tool-routing rules ([Tool routing](#tool-routing-opt-in)). Read when a session starts and on `/stream-rules reload`. |
 
 ## What it costs
 
 - Matching is local regex work: no model calls, no tokens.
+- Tool routing is local too: one linear scan of the Bash command (capped at 64 KiB and 256 commands), and one `tool.list` lookup when a routing rule matches. A refusal is a short message (each bundled rule's text is under 600 characters) that the model reads, then a retry with the native tool: one more model response.
 - A corrective turn is one more turn on your session's model. The conversation is only appended to, so the prompt cache still serves the earlier part.
 - A judged rule costs one `judgeModel` call per main turn whose answer passes its prefilter, at most `judgeMaxPerTurn` a turn. Each call sends the question and up to 32,000 characters of the answer and asks for one word. These calls aren't counted in Claude Code's session cost.
 - A draft is one `draftModel` call with your complaint and up to 20,000 characters of recent conversation.
@@ -107,6 +150,10 @@ Drafts a rule from a complaint ("it keeps saying 'you're absolutely right'"). Th
 - **Headless runs** (`claude -p`): the run ends with the final answer, so a judged rule's reminder after it is refused (and logged). Corrective turns and tool refusals work headless.
 - **Judged verdicts are yes/no from one call**, not a calibrated probability, and see only the final answer, not what the tools did.
 - **A hot reload drops a pending correction** (the timer that would send it is gone). The mod logs that it dropped it.
+- **Tool routing is guidance, not containment.** It catches the plain forms above; `bash -c 'cat f'`, `xargs cat`, `sudo cat`, aliases, functions, scripts and any wrapper get through, as does the bypass. Control flow (`if grep -q …; then …`) and expansions skip routing for the whole command. Routing refusals count toward no cap: a model that keeps retrying the shell form is refused each time.
+- **Search and file routing are untested against real Grep and Glob tools**, since Claude Code 2.1.310 has neither. Their messages name the tool without an argument example. Count modes (`grep -c`, `rg --count`) are left to Bash.
+- **Subagents with fewer tools.** `$.tool.list()` reports the session's tools, not a subagent's: a subagent without `Read` is still pointed to it, and has the bypass.
+- Cut from oh-my-pi's bash interceptor: its Write-redirection and managed-service rules, `locate`/`ag`/`ack`, and routing for leading-`cd` commands.
 - Cut from the oh-my-pi feature for this version: AST (structural) conditions, the 26 bundled language rules, a global `globs` filter, `contextMode: discard`, per-rule interrupt modes beyond `interrupt: true|false`, and an interactive preview for drafts.
 
 ## Install
@@ -128,6 +175,8 @@ claude plugin update stream-rules@stream-rules
 ```
 
 Then restart Claude Code.
+
+0.2.0 adds the opt-in `toolRouting` option (off by default, so nothing changes until you turn it on in `/config`), the `test-tool` subcommand and the `matcher` rule field.
 
 ## Develop
 
