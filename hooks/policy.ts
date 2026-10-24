@@ -283,7 +283,7 @@ export function routingStatusText(config: Config, s: Session, rules: readonly Ru
   const names = active.length === 0 ? 'none' : active.map(r => `${r.name} (${targetOf(r.matcher!)})`).join(', ')
   // Configured and available is not acting: the off switch (session or option) stops every rule.
   lines.push(isActive(config, s) ? `  active: ${names}` : `  configured, not acting while stream-rules is off: ${names}`)
-  if (tools === null) lines.push('  could not list the tools, so no routing rule is acting')
+  if (tools === null) lines.push('  could not list tools; routing fails open')
   else {
     for (const r of enabled.filter(x => !targetAvailable(x, tools))) {
       lines.push(`  ${targetOf(r.matcher!)} tool not available on this Claude Code; ${ROUTE_LABEL[r.matcher!]} routing off`)
@@ -313,6 +313,7 @@ export function testToolText(rules: readonly Rule[], command: string, tools: rea
     const does = h.interrupt ? 'refuses' : 'adds a note'
     if (!enforcing) lines.push(`${h.name}: matches, but enforcement is off (it ${does} once stream-rules is on)`)
     else if (h.matcher === undefined) lines.push(`${h.name}: matches; ${does}`)
+    else if (tools === null) lines.push(`${h.name}: matches, but could not list tools; routing fails open`)
     else if (targetAvailable(h, tools)) lines.push(`${h.name}: matches; ${does} and points to ${targetOf(h.matcher)}`)
     else lines.push(`${h.name}: matches, but this session has no ${targetOf(h.matcher)} tool, so it doesn't act`)
   }

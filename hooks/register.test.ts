@@ -12,7 +12,7 @@ const NO_RM = "---\ndescription: No rm -rf\ncondition: 'rm\\s+-rf'\nscope: ['too
 const NOTE_TS = "---\ncondition: ': any\\b'\nscope: ['tool:Edit(*.ts)']\ninterrupt: false\n---\nPrefer unknown.\n"
 const JUDGED = '---\ndescription: Show the test output\nquestion: Does the reply claim tests passed without showing output?\n---\nPaste the test output.\n'
 
-type Opts = { tools?: string[] | 'fail'; files?: Record<string, string>; abortFails?: boolean; toolDenyFirst?: boolean; judge?: (prompt: string) => ModelCompleteResult | Promise<ModelCompleteResult>; messages?: SessionMessage[] }
+type Opts = { tools?: string[] | 'fail' | 'deny'; files?: Record<string, string>; abortFails?: boolean; toolDenyFirst?: boolean; judge?: (prompt: string) => ModelCompleteResult | Promise<ModelCompleteResult>; messages?: SessionMessage[] }
 
 /** The engine beneath the plugin. `stream` sets the chunks the next model request yields. */
 const world = (on: On, opts: Opts = {}) => {
@@ -84,9 +84,10 @@ const world = (on: On, opts: Opts = {}) => {
     return { value: await fn(e.prompt) }
   })
   on('session.messages', () => ({ value: opts.messages ?? [] }))
-  const tools = opts.tools ?? ['Bash', 'Read', 'Edit', 'Write']
+  let tools = opts.tools ?? ['Bash', 'Read', 'Edit', 'Write']
   on('tool.list', () => {
     if (tools === 'fail') throw new Error('no tools')
+    if (tools === 'deny') return { deny: 'the tool list was refused' }
     return { value: tools.map(name => ({ name, description: name, mcp: false })) }
   })
 
@@ -99,6 +100,7 @@ const world = (on: On, opts: Opts = {}) => {
     submits,
     ran,
     inputs,
+    setTools: (t: string[] | 'fail' | 'deny') => (tools = t),
     completions,
     appended: () => session.appended().filter(r => r.door === 'note'),
     stream: (c: TurnStepChunk[]) => (chunks = c),
@@ -849,11 +851,23 @@ describe('tool routing', () => {
   })
 
   test('when the tool list fails, routing lets the call run and records why', ON, async ($, on) => {
-    const w = world(on, { tools: 'fail' })
+    const w = world(on, { tools: 'deny' })
     await start($)
     expect((await bash($, 'cat a.txt')).deny).toBeUndefined()
     expect(w.ran).toEqual(['Bash'])
-    expect((await cmd($, 'status')).text).toContain('could not list the tools')
+    // status's own lookup succeeds now, so the line can only come from the guard's record
+    w.setTools(['Bash', 'Read', 'Edit'])
+    const status = (await cmd($, 'status')).text
+    expect(status).toContain('Last error: could not list the tools; tool routing let the call run')
+    expect(status).not.toContain('routing fails open')
+    expect(status).toContain('active: tool-routing-edit (Edit), tool-routing-read (Read)')
+    // and while the list fails, status and test-tool say so rather than calling Read absent
+    w.setTools('deny')
+    expect((await cmd($, 'status')).text).toContain('could not list tools; routing fails open')
+    const t = (await cmd($, 'test-tool Bash cat a.txt')).text
+    expect(t).toContain('tool-routing-read: matches, but could not list tools; routing fails open')
+    expect(t).not.toContain('has no Read tool')
+    expect(t).toContain('Would run.')
   })
 
   test('/clear resets the routing counts', ON, async ($, on) => {

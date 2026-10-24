@@ -78,7 +78,7 @@ Models often read and edit files through Bash (`cat file`, `sed -i`) when Claude
 | `tool-routing-search` | `bash-native-search` | `grep pattern file`, `rg pattern [path]` | the Grep tool, **only when the session has one** |
 | `tool-routing-files` | `bash-native-files` | `find path -name '*.ts' [-type f]`, `fd -g '*.ts' [-t f]`, `ls -R` | the Glob tool, **only when the session has one** |
 
-Claude Code 2.1.310 has no Grep or Glob tool: search and file finding go through Bash. So on that release only the read and edit rules act, and `/stream-rules status` says "Grep tool not available on this Claude Code; search routing off" (and the same for Glob). The mod never tells the model to call a tool the session doesn't have.
+Claude Code 2.1.310 has no Grep or Glob tool: search and file finding go through Bash. So on that release only the read and edit rules act, and `/stream-rules status` says "Grep tool not available on this Claude Code; search routing off" (and the same for Glob). The mod never tells the model to call a tool the session doesn't have. If the session's tool list can't be read, routing lets the call run, records the error, and status and `test-tool` say "could not list tools; routing fails open".
 
 What is refused is deliberately narrow. A command is routed only when the whole of one command in it is a plain, recognized form, and anything the matcher doesn't fully understand runs untouched:
 
