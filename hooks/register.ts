@@ -337,7 +337,9 @@ export const register: Register = (on, options) => {
     const stop = eligible.filter(r => r.interrupt)
     if (stop.length > 0) {
       log($, `refused ${String(e.tool)} (${stop.map(r => r.name).join(', ')})`)
-      return { deny: denyText(stop) }
+      // The denial carries every claimed rule, the passive ones too: a rule is
+      // marked fired only when its message reached the model.
+      return { deny: denyText(eligible) }
     }
     const r = await next(e)
     if (r.deny !== undefined) return r

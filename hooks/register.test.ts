@@ -380,6 +380,16 @@ describe('/stream-rules-draft', () => {
 })
 
 describe('lifecycle and review regressions', () => {
+  test('denying one rule must not consume undelivered passive guidance', async ($, on) => {
+    const passive = "---\ncondition: 'touch'\nscope: ['tool:Bash']\ninterrupt: false\nrepeat: once\n---\nPASSIVE MESSAGE\n"
+    const stopRule = "---\ncondition: 'secret'\nscope: ['tool:Bash']\n---\nSTOP MESSAGE\n"
+    const w = world(on, { files: { [`${USER_DIR}/passive.md`]: passive, [`${USER_DIR}/stop.md`]: stopRule } })
+    await start($)
+    const first = await $.tool.call({ tool: 'Bash', command: 'touch secret' })
+    const second = await $.tool.call({ tool: 'Bash', command: 'touch public' })
+    expect(`${first.deny ?? ''}\n${second.context?.join('\n') ?? ''}`).toContain('PASSIVE MESSAGE')
+  })
+
   test('malformed quoted condition is reported rather than broadened', async ($, on) => {
     world(on, { files: { [`${USER_DIR}/broken.md`]: "---\ncondition: '(?i)you're right'\nscope: [text]\n---\nDo not flatter.\n" } })
     await start($)
