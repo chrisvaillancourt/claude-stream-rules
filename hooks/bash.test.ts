@@ -108,6 +108,10 @@ const CORPUS: readonly (readonly [command: string, expected: Expected, why?: str
   ['grep foo < file.txt', 'pass', 'redirected input'],
   ['grep foo file.txt > hits', 'pass', 'redirected output'],
   ['grep -P foo file.txt', 'pass', 'unknown option'],
+  ['grep foo -', 'pass', 'explicit stdin'],
+  ['rg foo -', 'pass', 'explicit stdin'],
+  ['grep foo a.txt -', 'pass', 'stdin among the paths'],
+  ['rg -e foo -- -', 'pass', 'explicit stdin after --'],
 
   // discovery
   ["find src -name '*.ts' -type f", 'files'],

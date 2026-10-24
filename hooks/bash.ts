@@ -319,6 +319,9 @@ function options(
   return operands
 }
 
+/** An explicit `-` path: search stdin, which a path-based tool can't. */
+const isStdin = (w: Word) => w.text === '-'
+
 function grepSearch(args: readonly Word[]): boolean {
   let pattern = false
   const ops = options(
@@ -330,7 +333,7 @@ function grepSearch(args: readonly Word[]): boolean {
   )
   if (ops === undefined || !ops.every(literal)) return false
   const paths = pattern ? ops : ops.slice(1)
-  return (pattern || ops.length > 0) && paths.length > 0
+  return (pattern || ops.length > 0) && paths.length > 0 && !paths.some(isStdin)
 }
 
 function rgSearch(args: readonly Word[]): boolean {
@@ -343,7 +346,8 @@ function rgSearch(args: readonly Word[]): boolean {
     },
   )
   if (ops === undefined || !ops.every(literal)) return false
-  return pattern || ops.length > 0
+  const paths = pattern ? ops : ops.slice(1)
+  return (pattern || ops.length > 0) && !paths.some(isStdin)
 }
 
 function findFiles(args: readonly Word[]): boolean {
