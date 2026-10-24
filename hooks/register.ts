@@ -331,7 +331,9 @@ export const register: Register = (on, options) => {
       return { deny: a.text }
     }
     const r = await next(e)
-    if (r.deny !== undefined) return r
+    // Refused beneath (a permission, another plugin): the note rides on the
+    // refusal, so the claimed rule isn't spent unseen.
+    if (r.deny !== undefined) return { deny: `${r.deny}\n\n${a.text}` }
     return { ...r, context: [...(r.context ?? []), a.text] }
   }).catch(async ($, e, next) => {
     // Fail open: rules are guidance, not a security boundary, and a broken

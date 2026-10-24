@@ -707,6 +707,15 @@ describe('ownership interleavings (round 2)', () => {
     expect(w.submits).toEqual(['loop tick'])
   })
 
+  test('a lower tool denial does not consume undelivered passive guidance', async ($, on) => {
+    const passive = "---\ncondition: 'touch'\nscope: ['tool:Bash']\ninterrupt: false\nrepeat: once\n---\nPASSIVE MESSAGE\n"
+    world(on, { files: { [`${USER_DIR}/passive.md`]: passive }, toolDenyFirst: true })
+    await start($)
+    const denied = await $.tool.call({ tool: 'Bash', command: 'touch a' })
+    const allowed = await $.tool.call({ tool: 'Bash', command: 'touch b' })
+    expect(`${denied.deny ?? ''}\n${allowed.context?.join('\n') ?? ''}`).toContain('PASSIVE MESSAGE')
+  })
+
   test('querying status neither supersedes correction nor resets the cap', async ($, on) => {
     const w = world(on, { files: { [`${USER_DIR}/banana.md`]: BANANA.replace('scope: [text]', 'scope: [text]\nrepeat: always') } })
     await start($)
