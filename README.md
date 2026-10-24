@@ -69,7 +69,7 @@ The `examples/` folder has one rule per kind. None is loaded until you copy it i
 
 `/stream-rules-draft <complaint> | show | save [project|user] [overwrite] | cancel`
 
-Drafts a rule from a complaint ("it keeps saying 'you're absolutely right'"). The draft model reads your complaint and the recent conversation and writes a rule; the mod parses it with the same code that loads rules, runs its conditions over the recent assistant messages and reports how many each matches (a regex that matches everything is a bad rule), and shows the file. Nothing is written until you run `/stream-rules-draft save` (`project` by default, or `user`). Saving refuses to replace an existing file unless you add `overwrite`. A new draft replaces the one held.
+Drafts a rule from a complaint ("it keeps saying 'you're absolutely right'"). The draft model reads your complaint and the recent conversation and writes a rule; the mod parses it with the same code that loads rules, runs it over the last 20 assistant messages with the same matcher live enforcement uses (replies for a `text` scope, the recorded tool calls for a `tool` scope, path globs included) and reports how many it matches (a rule that matches everything is a bad rule; history keeps no streamed thinking, so a `thinking` scope isn't checked), and shows the file. Nothing is written until you run `/stream-rules-draft save` (`project` by default, or `user`). Saving refuses to replace an existing file unless you add `overwrite`. A new draft replaces the one held.
 
 ## Options
 

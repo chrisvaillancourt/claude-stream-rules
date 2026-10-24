@@ -349,7 +349,7 @@ describe('/stream-rules-draft', () => {
     expect(w.completions[0]).toContain('it keeps apologizing')
     expect(w.completions[0]).toContain('Sorry about that!')
     expect(shownDraft).toContain('name: no-sorry')
-    expect(shownDraft).toContain('matches 1 of the last 2 assistant messages')
+    expect(shownDraft).toContain('matches 1 of the last 2 assistant replies')
     expect(w.writes).toEqual([])
 
     const saved = (await draftCmd($, 'save')).text ?? ''
@@ -380,6 +380,30 @@ describe('/stream-rules-draft', () => {
 })
 
 describe('lifecycle and review regressions', () => {
+  test('tool drafts do not count prose as live tool matches', async ($, on) => {
+    const draft = "<rule>\n---\nname: no-any\ncondition: ': any\\b'\nscope: ['tool:Edit(*.ts)']\n---\nUse unknown.\n</rule>"
+    world(on, {
+      judge: () => ({ isAnswered: true, text: draft, usage: USAGE }),
+      messages: [{ role: 'assistant', text: 'The documentation explains : any as an example.', toolUses: [] }],
+    })
+    await start($)
+    const result = (await draftCmd($, 'avoid any in TypeScript edits')).text ?? ''
+    expect(result).toContain('matches 0')
+  })
+
+  test('tool drafts are checked against recent tool calls through the live matcher', async ($, on) => {
+    const draft = "<rule>\n---\nname: no-any\ncondition: ': any\\b'\nscope: ['tool:Edit(*.ts)']\n---\nUse unknown.\n</rule>"
+    const edit = (path: string) => ({ tool_use_id: path, tool: 'Edit', input: { file_path: path, old_string: '', new_string: 'let x: any' } })
+    world(on, {
+      judge: () => ({ isAnswered: true, text: draft, usage: USAGE }),
+      messages: [{ role: 'assistant', text: 'Editing.', toolUses: [edit('/p/a.ts'), edit('/p/a.md')] }],
+    })
+    await start($)
+    const result = (await draftCmd($, 'avoid any')).text ?? ''
+    expect(result).toContain('matches 1 of the last 2 tool calls')
+    expect(result).not.toContain('replies')
+  })
+
   test('denying one rule must not consume undelivered passive guidance', async ($, on) => {
     const passive = "---\ncondition: 'touch'\nscope: ['tool:Bash']\ninterrupt: false\nrepeat: once\n---\nPASSIVE MESSAGE\n"
     const stopRule = "---\ncondition: 'secret'\nscope: ['tool:Bash']\n---\nSTOP MESSAGE\n"

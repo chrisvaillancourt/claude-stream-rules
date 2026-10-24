@@ -1,5 +1,6 @@
 // Pure decisions and text: no `$`, no I/O. register.ts wires them to events.
 import type { Config, LoadError, Mode, RuleSpec, Session } from '../types'
+import { matchText, matchTool, projectTool } from './rules'
 import type { Rule } from './rules'
 
 export const INITIAL: Session = { mode: null, corrections: 0, lastError: null, fired: {}, steps: {} }
@@ -261,4 +262,39 @@ export function testText(rules: readonly Rule[], text: string): string {
     } else if (hit) lines.push(`${r.name}: matches (${r.interrupt ? 'stops the reply' : 'reminds'})`)
   }
   return lines.length > 0 ? lines.join('\n') : 'No rule matches that text.'
+}
+
+type HistoryMessage = { role: string; text: string; toolUses: readonly { tool: string; input: unknown }[] }
+
+const example = (t: string) => `\n  for example: ${t.replace(/\s+/g, ' ').slice(0, 160)}`
+
+/**
+ * How a draft would have fired on recent history, through the same matchers
+ * live enforcement uses: replies for text scope, recorded tool calls (their
+ * inputs projected as at a live call) for tool scope. History keeps no
+ * streamed thinking, so a thinking scope is reported as not checked.
+ */
+export function draftCheck(rule: Rule, messages: readonly HistoryMessage[]): string {
+  const assistant = messages.filter(m => m.role === 'assistant').slice(-DRAFT_CHECK_MESSAGES)
+  const replies = assistant.map(m => m.text).filter(t => t.trim() !== '')
+  if (rule.question !== undefined) {
+    if (rule.regexes.length === 0) return 'Judged rule with no condition: the judge model checks each final answer; nothing here to test it on.'
+    const hits = replies.filter(t => rule.regexes.some(re => re.test(t)))
+    return `Judged rule: its condition (the prefilter) matches ${hits.length} of the last ${replies.length} assistant replies.${hits.length > 0 ? example(hits.at(-1)!) : ''}`
+  }
+  const lines: string[] = []
+  if (rule.scope.some(s => s.kind === 'text')) {
+    const hits = replies.filter(t => matchText([rule], 'text', t).length > 0)
+    lines.push(`Reply scope: matches ${hits.length} of the last ${replies.length} assistant replies.${hits.length > 0 ? example(hits.at(-1)!) : ''}`)
+  }
+  if (rule.scope.some(s => s.kind === 'tool')) {
+    const calls = assistant.flatMap(m => m.toolUses)
+    const hits = calls.filter(c => matchTool([rule], c.tool, c.input).length > 0)
+    const last = hits.at(-1)
+    lines.push(
+      `Tool scope: matches ${hits.length} of the last ${calls.length} tool calls.${last ? example(`${last.tool}: ${projectTool(last.tool, last.input).text}`) : ''}`,
+    )
+  }
+  if (rule.scope.some(s => s.kind === 'thinking')) lines.push('Thinking scope: not checked; the conversation history keeps no streamed thinking.')
+  return lines.join('\n')
 }

@@ -2,7 +2,6 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, TurnStepChunk } from 'claude-code'
 
 import {
-  DRAFT_CHECK_MESSAGES,
   DRAFT_USAGE,
   INITIAL,
   USAGE,
@@ -13,6 +12,7 @@ import {
   contextText,
   correctionText,
   denyText,
+  draftCheck,
   draftPrompt,
   extractDraft,
   isActive,
@@ -225,17 +225,9 @@ async function runDraft($: EngineInterface, complaint: string): Promise<string> 
     return `The draft doesn't load: ${parsed.error}. It isn't held; try again.\n\n${text}`
   }
   const [rule] = compile([parsed.rule])
-  const recent = messages
-    .filter(m => m.role === 'assistant' && m.text.trim() !== '')
-    .slice(-DRAFT_CHECK_MESSAGES)
-    .map(m => m.text)
-  const hits = rule!.regexes.length === 0 ? undefined : recent.filter(t => rule!.regexes.some(re => re.test(t)))
   await update($, draftAtom, () => ({ name: parsed.rule.name, text }))
-  const check =
-    hits === undefined
-      ? 'Judged rule (no condition): checked by the judge model after each answer.'
-      : `Its condition matches ${hits.length} of the last ${recent.length} assistant messages${hits.length > 0 ? `, for example:\n  ${hits[hits.length - 1]!.slice(0, 160).replace(/\s+/g, ' ')}` : '.'}`
-  const exists = rule!.name !== '' && rules.some(r => r.name === rule!.name) ? `\nA loaded rule is already named ${rule!.name}; saving over its file needs overwrite.` : ''
+  const check = draftCheck(rule!, messages)
+  const exists = rules.some(r => r.name === rule!.name) ? `\nA loaded rule is already named ${rule!.name}; saving over its file needs overwrite.` : ''
   return `Draft rule ${parsed.rule.name}:\n\n${text}\n\n${check}${exists}\n\nRun /stream-rules-draft save (project) or save user to write it, or cancel.`
 }
 
