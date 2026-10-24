@@ -280,7 +280,9 @@ export function routingStatusText(config: Config, s: Session, rules: readonly Ru
   const lines = [config.toolRouting ? `${head}.` : `${head}; your own routing rules still apply.`]
   const enabled = routing.filter(r => r.enabled)
   const active = enabled.filter(r => targetAvailable(r, tools))
-  lines.push(`  active: ${active.length === 0 ? 'none' : active.map(r => `${r.name} (${targetOf(r.matcher!)})`).join(', ')}`)
+  const names = active.length === 0 ? 'none' : active.map(r => `${r.name} (${targetOf(r.matcher!)})`).join(', ')
+  // Configured and available is not acting: the off switch (session or option) stops every rule.
+  lines.push(isActive(config, s) ? `  active: ${names}` : `  configured, not acting while stream-rules is off: ${names}`)
   if (tools === null) lines.push('  could not list the tools, so no routing rule is acting')
   else {
     for (const r of enabled.filter(x => !targetAvailable(x, tools))) {
@@ -304,14 +306,19 @@ const analysisText = (a: Classification | undefined): string => {
 }
 
 /** `/stream-rules test-tool Bash <command>`: what the matcher makes of it, which rules match, and the outcome. Repeat state and the bypass are left out. */
-export function testToolText(rules: readonly Rule[], command: string, tools: readonly string[] | null): string {
+export function testToolText(rules: readonly Rule[], command: string, tools: readonly string[] | null, enforcing: boolean): string {
   const { hits, analysis } = matchToolCall(rules, 'Bash', { command })
   const lines = [analysisText(analysis)]
   for (const h of hits) {
     const does = h.interrupt ? 'refuses' : 'adds a note'
-    if (h.matcher === undefined) lines.push(`${h.name}: matches; ${does}`)
+    if (!enforcing) lines.push(`${h.name}: matches, but enforcement is off (it ${does} once stream-rules is on)`)
+    else if (h.matcher === undefined) lines.push(`${h.name}: matches; ${does}`)
     else if (targetAvailable(h, tools)) lines.push(`${h.name}: matches; ${does} and points to ${targetOf(h.matcher)}`)
     else lines.push(`${h.name}: matches, but this session has no ${targetOf(h.matcher)} tool, so it doesn't act`)
+  }
+  if (!enforcing) {
+    lines.push('Would run: stream-rules is off for this session.')
+    return lines.join('\n')
   }
   const acting = hits.filter(h => targetAvailable(h, tools))
   const ordinaryStops = acting.filter(h => h.matcher === undefined && h.interrupt)

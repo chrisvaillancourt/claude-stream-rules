@@ -894,4 +894,20 @@ describe('tool routing review round 1', () => {
     expect((await bash($, 'cat notes.txt', { description: '[tool-routing bypass] exact shell requested' })).deny).toContain('This project wants Read.')
     expect(w.ran).toEqual([])
   })
+
+  test('with stream-rules off, test-tool and status say nothing is acting', { options: { toolRouting: true } }, async ($, on) => {
+    world(on)
+    await start($)
+    await cmd($, 'off')
+    const t = (await cmd($, 'test-tool Bash cat notes.txt')).text
+    expect(t).toContain('tool-routing-read: matches, but enforcement is off')
+    expect(t).toContain('Would run: stream-rules is off for this session.')
+    expect(t).not.toContain('Would be refused')
+    const status = (await cmd($, 'status')).text
+    expect(status).toContain('configured, not acting while stream-rules is off: tool-routing-edit (Edit), tool-routing-read (Read)')
+    expect(status).not.toContain('active: tool-routing')
+    await cmd($, 'on')
+    expect((await cmd($, 'test-tool Bash cat notes.txt')).text).toContain('Would be refused by tool-routing-read.')
+    expect((await cmd($, 'status')).text).toContain('active: tool-routing-edit (Edit), tool-routing-read (Read)')
+  })
 })

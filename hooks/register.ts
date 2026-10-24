@@ -352,7 +352,7 @@ export const register: Register = (on, options) => {
     if (cmd.kind === 'reset') await update($, sessionAtom, s => ({ ...s, fired: {}, lastError: null }))
     if (cmd.kind === 'list') return { text: listText(rules, loadErrors) }
     if (cmd.kind === 'test') return { text: testText(rules, cmd.text) }
-    if (cmd.kind === 'test-tool') return { text: testToolText(rules, cmd.command, await toolNames($)) }
+    if (cmd.kind === 'test-tool') return { text: testToolText(rules, cmd.command, await toolNames($), isActive(config, await read($, sessionAtom))) }
     const s = await read($, sessionAtom)
     return { text: `${statusText(config, s, rules.length, loadErrors.length)}\n${routingStatusText(config, s, rules, await toolNames($))}` }
   })

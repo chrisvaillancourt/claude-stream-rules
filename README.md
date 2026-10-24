@@ -109,10 +109,10 @@ You can also write your own routing rules: `matcher` takes one of the four value
 
 `/stream-rules [status|list|test <text>|test-tool Bash <command>|on|off|reload|reset]`
 
-- `status` (the default): on or off and why, how many rules loaded, corrections used, the last error; and tool routing's state: whether the option is on, which routing rules are active, which are off for want of their target tool, and how many Bash calls were unsupported, over the size limit or bypassed.
+- `status` (the default): on or off and why, how many rules loaded, corrections used, the last error; and tool routing's state: whether the option is on, which routing rules are active (or only configured, while `/stream-rules off` or the `enabled` option has the mod off), which are off for want of their target tool, and how many Bash calls were unsupported, over the size limit or bypassed.
 - `list`: every rule with its scope, conditions (or `matcher`) and source (`bundled`, `user`, `project`), then files that failed to load and why.
 - `test <text>`: which rules match the text as a reply. Judged rules show whether their prefilter matched; the question isn't asked.
-- `test-tool Bash <command>`: what the matcher makes of a Bash command and which rules would match it as a tool call: refused by which rule, or run. It ignores repeat state and the bypass.
+- `test-tool Bash <command>`: what the matcher makes of a Bash command and which rules would match it as a tool call: refused by which rule, or run. While the mod is off it says so and that the call would run. It ignores repeat state and the bypass.
 - `on` / `off`: turn the mod on or off for this session.
 - `reload`: read the rule folders again.
 - `reset`: forget which rules have fired this session, so `once` rules can fire again.
